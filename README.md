@@ -4,7 +4,8 @@ ComfyUI nodes collection... eventually.
 
 ## Features
 
-Currently only better TAESD previews.
+1. Better TAESD previews (see below)
+2. Allow setting seed and timestep range for HyperTile (look for the `BlehHyperTile` node)
 
 ## Configuration
 
@@ -31,3 +32,18 @@ Current defaults from `blehconfig.json`
 |`use_cuda`|`true`|Use special logic for CUDA (and maybe pretend-CUDA like ROCM) to reduce the performance impact of preview generation|
 
 I would recommend setting `throttle_secs` to something relatively high like 5-10 sec especially if you are generating batches at high resolution.
+
+### BlehHyperTile
+
+Adds the ability to set a seed and timestep range that HyperTile gets applied for. *Not* well tested, and I just assumed the Inspire version works which may or may not be the case.
+
+**Note**: Timesteps start from 999 and count down to 0 and also are not necessarily linear. Exactly what sampling step a timestep applies
+to is left as an exercise for you, dear node user.
+
+HyperTile credits:
+
+The node was originally taken by Comfy from taken from: https://github.com/tfernd/HyperTile/
+
+Then the Inspire node pack took it from the base ComfyUI node: https://github.com/ltdrdata/ComfyUI-Inspire-Pack
+
+Then I took it from the Inspire node pack. The original license was MIT so I assume yoinking it into this repo is probably okay.
