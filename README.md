@@ -18,7 +18,7 @@ Restart ComfyUI to apply new changes.
 * Supports setting max preview size (ComfyUI default is hardcoded to 512 max).
 * Supports showing previews for more than the first latent in the batch.
 * Supports throttling previews. Do you really need your expensive TAESD preview to get updated 3 times a second?
-* Supports using CUDA streams to avoid waiting for a synchronize. This might be faster.
+* Supports using CUDA streams to avoid waiting for a synchronize. Increases speed slightly at the cost of higher VRAM usage. For comparison, a batch of 8 768x768 images with throttle at `0.5` sec is `1.29s/it` with it on and `1.42s/it` with it off for me.
 
 Current defaults from `blehconfig.json`
 
@@ -29,9 +29,9 @@ Current defaults from `blehconfig.json`
 |`max_batch`|`4`|Max number of latents in a batch to preview|
 |`max_batch_cols`|`2`|Max number of columns to use when previewing batches|
 |`throttle_secs`|`1`|Max frequency to decode the latents for previewing. `0.25` would be every 1/4 sec, `2` would be only once every two seconds|
-|`use_cuda`|`true`|Use special logic for CUDA (and maybe pretend-CUDA like ROCM) to reduce the performance impact of preview generation|
+|`use_cuda`|`false`|Use special logic for CUDA (and maybe pretend-CUDA like ROCM) to reduce the performance impact of preview generation|
 
-I would recommend setting `throttle_secs` to something relatively high like 5-10 sec especially if you are generating batches at high resolution.
+I would recommend setting `throttle_secs` to something relatively high like 5-10 sec especially if you are generating batches at high resolution. `use_cuda` now defaults to `false` as it can substantially increase VRAM requirements.
 
 ### BlehHyperTile
 
