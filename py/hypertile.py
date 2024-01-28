@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 import math
-import random
 
+import torch
 from einops import rearrange
 
 
@@ -23,8 +23,8 @@ class HyperTile:
         start_step,
         end_step,
     ):
-        self.rng = random.Random()
-        self.rng.seed(seed)
+        self.rng = torch.Generator()
+        self.rng.manual_seed(seed)
         self.model = model
         self.latent_tile_size = max(32, tile_size) // 8
         self.swap_size = swap_size
@@ -44,34 +44,6 @@ class HyperTile:
         model.set_model_attn1_output_patch(self.attn1_out)
         return model
 
-    @staticmethod
-    def get_closest_divisors(hw: int, aspect_ratio: float) -> tuple[int, int]:
-        pairs = tuple(
-            (i, hw // i) for i in range(int(math.sqrt(hw)), 1, -1) if hw % i == 0
-        )
-        pair = min(
-            ((i, hw // i) for i in range(2, hw + 1) if hw % i == 0),
-            key=lambda x: abs(x[1] / x[0] - aspect_ratio),
-        )
-        pairs.append(pair)
-        return min(pairs, key=lambda x: max(x) / min(x))
-
-    @classmethod
-    def calc_optimal_hw(cls, hw: int, aspect_ratio: float) -> tuple[int, int]:
-        hcand = round(math.sqrt(hw * aspect_ratio))
-        wcand = hw // hcand
-
-        if hcand * wcand == hw:
-            return hcand, wcand
-
-        wcand = round(math.sqrt(hw / aspect_ratio))
-        hcand = hw // wcand
-
-        if hcand * wcand != hw:
-            return cls.get_closest_divisors(hw, aspect_ratio)
-
-        return hcand, wcand
-
     def random_divisor(
         self,
         value: int,
@@ -83,8 +55,14 @@ class HyperTile:
         # All big divisors of value (inclusive)
         divisors = tuple(i for i in range(min_value, value + 1) if value % i == 0)
         ns = tuple(value // i for i in divisors[:max_options])  # has at least 1 element
-        idx = self.rng.randint(0, len(ns) - 1) if len(ns) - 1 > 0 else 0
-        return ns[idx]
+        return ns[
+            torch.randint(
+                generator=self.rng,
+                low=0,
+                high=len(ns) - 1,
+                size=(1,),
+            ).item()
+        ]
 
     def check_timestep(self, extra_options):
         current_timestep = self.model.model.model_sampling.timestep(
@@ -104,16 +82,13 @@ class HyperTile:
 
     def check_interval(self):
         if self.interval > 0:
-            matched = (self.counter % self.interval) == 0
-        elif self.interval < 0:
-            matched = ((self.counter + 1) % abs(self.interval)) > 0
-        else:
-            matched = False
-        return matched
+            return (self.counter % self.interval) == 0
+        if self.interval < 0:
+            return ((self.counter + 1) % abs(self.interval)) > 0
+        return False
 
     def attn1_in(self, q, k, v, extra_options):
         if not (self.check_timestep(extra_options) and self.check_interval()):
-            self.temp = None
             return q, k, v
         model_chans = q.shape[-2]
         orig_shape = extra_options["original_shape"]
