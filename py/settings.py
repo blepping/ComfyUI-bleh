@@ -11,11 +11,11 @@ class Settings:
             self.btp_enabled = False
         else:
             self.btp_enabled = True
-            self.btp_max_size = btp.get("max_size", 768)
-            self.btp_max_batch = btp.get("max_batch", 4)
-            self.btp_max_batch_cols = btp.get("max_batch_cols", 2)
+            self.btp_max_size = max(8, btp.get("max_size", 768))
+            self.btp_max_batch = max(1, btp.get("max_batch", 4))
+            self.btp_max_batch_cols = max(1, btp.get("max_batch_cols", 2))
             self.btp_throttle_secs = btp.get("throttle_secs", 1)
-            self.btp_use_cuda = btp.get("use_cuda", True)
+            self.btp_maxed_batch_step_mode = btp.get("maxed_batch_step_mode", False)
 
     def get_cfg_path(self, filename):
         my_path = Path.resolve(Path(__file__).parent)
@@ -27,6 +27,7 @@ class Settings:
         try:
             with Path.open(self.get_cfg_path(filename)) as fp:
                 self.update(json.load(fp))
+                return True
         except OSError:
             return False
 
@@ -36,6 +37,7 @@ class Settings:
 
             with Path.open(self.get_cfg_path(filename)) as fp:
                 self.update(yaml.safe_load(fp))
+                return True
         except (OSError, ImportError):
             return False
 

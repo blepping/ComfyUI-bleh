@@ -1,6 +1,6 @@
 # BLEH
 
-ComfyUI nodes collection... eventually.
+A ComfyUI nodes collection... eventually.
 
 ## Features
 
@@ -9,18 +9,17 @@ ComfyUI nodes collection... eventually.
 
 ## Configuration
 
-Copy `blehconfig.json.example` to `blehconfig.json` in the node repo directory and edit the copy.
+Copy either `blehconfig.yaml.example` or `blehconfig.json.example` to `blehconfig.yaml` or `blehconfig.json` respectively and edit the copy. When loading configuration, the YAML file will be prioritized if it exists and Python has YAML support.
 
-Restart ComfyUI to apply new changes.
+Restart ComfyUI to apply any new changes.
 
 ### Better TAESD previews
 
 * Supports setting max preview size (ComfyUI default is hardcoded to 512 max).
 * Supports showing previews for more than the first latent in the batch.
 * Supports throttling previews. Do you really need your expensive TAESD preview to get updated 3 times a second?
-* Supports using CUDA streams to avoid waiting for a synchronize. Increases speed slightly at the cost of higher VRAM usage. For comparison, a batch of 8 768x768 images with throttle at `0.5` sec is `1.29s/it` with it on and `1.42s/it` with it off for me.
 
-Current defaults from `blehconfig.json`
+Current defaults:
 
 |Key|Default|Description|
 |-|-|-|
@@ -28,17 +27,19 @@ Current defaults from `blehconfig.json`
 |`max_size`|`768`|Max width or height for previews. Note this does not affect TAESD decoding, just the preview image|
 |`max_batch`|`4`|Max number of latents in a batch to preview|
 |`max_batch_cols`|`2`|Max number of columns to use when previewing batches|
-|`throttle_secs`|`1`|Max frequency to decode the latents for previewing. `0.25` would be every 1/4 sec, `2` would be only once every two seconds|
-|`use_cuda`|`false`|Use special logic for CUDA (and maybe pretend-CUDA like ROCM) to reduce the performance impact of preview generation|
+|`throttle_secs`|`2`|Max frequency to decode the latents for previewing. `0.25` would be every quarter second, `2` would be once every two seconds|
+|`maxed_batch_step_mode`|`false`|When `false`, you will see the first `max_batch` previews, when `true` you will see previews spread across the batch|
 
-I would recommend setting `throttle_secs` to something relatively high like 5-10 sec especially if you are generating batches at high resolution. `use_cuda` now defaults to `false` as it can substantially increase VRAM requirements.
+These defaults are conservative. I would recommend setting `throttle_secs` to something relatively high (like 5-10) especially if you are generating batches at high resolution.
+
+Slightly more detailed explanation for `maxed_batch_step_mode`: If max previews is set to `3` and the batch size is `15` you will see previews for indexes `0, 5, 10`. Or to put it a different way, it steps through the batch by `batch_size / max_previews` rounded up. This behavior may be useful for previewing generations with a high batch count like when using AnimateDiff.
 
 ### BlehHyperTile
 
 Adds the ability to set a seed and timestep range that HyperTile gets applied for. *Not* well tested, and I just assumed the Inspire version works which may or may not be the case.
 
 **Note**: Timesteps start from 999 and count down to 0 and also are not necessarily linear. Exactly what sampling step a timestep applies
-to is left as an exercise for you, dear node user.
+to is left as an exercise for you, dear node user. As an example, Karras and exponentially samplers essentially rush to low timesteps and spend quite a bit of time there.
 
 HyperTile credits:
 

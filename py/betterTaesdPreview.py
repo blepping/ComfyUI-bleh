@@ -20,11 +20,6 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
         self.stream = None
         self.prev_work = None
         self.cpudev = torch.device("cpu")
-        self.use_cuda = (
-            SETTINGS.btp_use_cuda
-            and hasattr(torch, "cuda")
-            and torch.cuda.is_available()
-        )
 
     def decode_latent_to_preview_image(self, preview_format, x0):
         preview_image = self.decode_latent_to_preview(x0)
@@ -44,49 +39,35 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
         return False
 
     def _decode_latent(self, x0):
-        samples = (self.taesd.decode(x0[: SETTINGS.btp_max_batch]) + 1.0) / 2.0
+        max_batch = SETTINGS.btp_max_batch
+        batch_size = x0.shape[0]
+        if not SETTINGS.btp_maxed_batch_step_mode:
+            indexes = range(min(max_batch, batch_size))
+        else:
+            indexes = range(
+                0,
+                batch_size,
+                math.ceil(batch_size / max_batch),
+            )[:max_batch]
+        samples = (self.taesd.decode(x0[indexes, :]) + 1.0) / 2.0
         samples = torch.clamp(samples, min=0.0, max=1.0) * 255.0
         return samples.to(dtype=torch.uint8).detach()
 
-    def decode_latent_to_preview(self, x0):
-        use_cached = self.check_use_cached()
-        if x0.device == self.cpudev or not self.use_cuda:
-            return (
-                self.cached if use_cached else self._decode_latent_to_preview_nocuda(x0)
-            )
-        if self.stream is None:
-            self.stream = torch.cuda.Stream()
-        elif not self.stream.query():
-            return self.cached or self.blank
-        work = None
-        if self.prev_work is not None:
-            # We will only arrive here if the stream is ready. Sync just to be safe, should be instant.
-            self.stream.synchronize()
-            work = self.prev_work
-            del self.prev_work
-        result = self.work_to_image(work) if work is not None else self.blank
-        if use_cached:
-            return result
-        # The original stream may be still processing the current step.
-        orig_stream = torch.cuda.current_stream()
-        self.stream.wait_stream(orig_stream)
-        try:
-            torch.cuda.set_stream(self.stream)
-            self.prev_work = self._decode_latent(x0).to(
-                device=self.cpudev,
-                non_blocking=True,
-            )
-        finally:
-            torch.cuda.set_stream(orig_stream)
-        return result
-
     def calc_cols_rows(self, batch_size, width, height):
-        ratio = width / height
-        cols = min(math.ceil(batch_size / 2), SETTINGS.btp_max_batch_cols)
+        max_cols = SETTINGS.btp_max_batch_cols
+        ratio = height / width
+        if ratio >= 1.75:
+            # Very tall images - prioritize horizontal layout.
+            cols = min(batch_size, max_cols)
+        elif ratio <= 0.5:
+            # Very wide images - prioritize vertical layout.
+            cols = min(math.ceil(batch_size / 4), max_cols)
+        else:
+            cols = min(math.ceil(batch_size / ratio), max_cols)
         rows = math.ceil(batch_size / cols)
         return cols, rows
 
-    def work_to_image(self, samples):
+    def decoded_to_image(self, samples):
         samples = tuple(np.moveaxis(x, 0, 2) for x in samples.numpy())
         batch_size = len(samples)
         height, width, _ = samples[0].shape
@@ -104,8 +85,10 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
         self.cached = result
         return result
 
-    def _decode_latent_to_preview_nocuda(self, x0):
-        return self.work_to_image(self._decode_latent(x0).cpu())
+    def decode_latent_to_preview(self, x0):
+        if self.check_use_cached():
+            return self.cached
+        return self.decoded_to_image(self._decode_latent(x0).cpu())
 
 
 latent_preview.TAESDPreviewerImpl = BetterTAESDPreviewer

@@ -1,0 +1,7 @@
+betterTaesdPreviews:
+    enabled: true
+    max_size: 768
+    max_batch: 4
+    max_batch_cols: 2
+    throttle_secs: 1
+    maxed_batch_step_mode: false
