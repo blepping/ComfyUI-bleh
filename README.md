@@ -38,6 +38,8 @@ Slightly more detailed explanation for `maxed_batch_step_mode`: If max previews 
 
 Adds the ability to set a seed and timestep range that HyperTile gets applied for. *Not* well tested, and I just assumed the Inspire version works which may or may not be the case.
 
+It is also possible to set an interval for HyperTile steps, this time it is just normal sampling steps that match the timestep range. The first sampling step that matches the timestep range always applies HyperTile, after that the follow behavior applies: If the interval is positive then you just get HyperTile every `interval` steps. It is also possible to set interval to a negative value, for example `-3` would mean out of every three steps, the first two have HyperTile and the third doesn't.
+
 **Note**: Timesteps start from 999 and count down to 0 and also are not necessarily linear. Exactly what sampling step a timestep applies
 to is left as an exercise for you, dear node user. As an example, Karras and exponentially samplers essentially rush to low timesteps and spend quite a bit of time there.
 

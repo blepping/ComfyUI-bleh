@@ -19,6 +19,7 @@ class HyperTile:
         swap_size,
         max_depth,
         scale_depth,
+        interval,
         start_step,
         end_step,
     ):
@@ -31,6 +32,9 @@ class HyperTile:
         self.scale_depth = scale_depth
         self.start_step = start_step
         self.end_step = end_step
+        self.interval = interval
+        self.last_timestep = -1
+        self.counter = -1
         # Temporary storage for rearranged tensors in the output part
         self.temp = None
 
@@ -86,13 +90,31 @@ class HyperTile:
         current_timestep = self.model.model.model_sampling.timestep(
             extra_options["sigmas"][0],
         ).item()
-        return current_timestep <= self.start_step and current_timestep >= self.end_step
+        matched = (
+            current_timestep <= self.start_step and current_timestep >= self.end_step
+        )
+        if current_timestep > self.last_timestep:
+            # Detecting if the model got reused to sample again... maybe?
+            self.counter = 0 if matched else -1
+            self.temp = None
+        elif matched and current_timestep != self.last_timestep:
+            self.counter += 1
+        self.last_timestep = current_timestep
+        return matched
+
+    def check_interval(self):
+        if self.interval > 0:
+            matched = (self.counter % self.interval) == 0
+        elif self.interval < 0:
+            matched = ((self.counter + 1) % abs(self.interval)) > 0
+        else:
+            matched = False
+        return matched
 
     def attn1_in(self, q, k, v, extra_options):
-        if not self.check_timestep(extra_options):
+        if not (self.check_timestep(extra_options) and self.check_interval()):
             self.temp = None
             return q, k, v
-
         model_chans = q.shape[-2]
         orig_shape = extra_options["original_shape"]
 
@@ -155,10 +177,11 @@ class HyperTileBleh:
                 "swap_size": ("INT", {"default": 2, "min": 1, "max": 128}),
                 "max_depth": ("INT", {"default": 0, "min": 0, "max": 10}),
                 "scale_depth": ("BOOLEAN", {"default": False}),
+                "interval": ("INT", {"default": 1, "min": -999, "max": 999}),
                 "start_step": (
                     "INT",
                     {
-                        "default": 0,
+                        "default": 1000,
                         "min": 0,
                         "max": 1000,
                         "step": 1,
@@ -168,10 +191,10 @@ class HyperTileBleh:
                 "end_step": (
                     "INT",
                     {
-                        "default": 1000,
+                        "default": 0,
                         "min": 0,
                         "max": 1000,
-                        "step": 0.1,
+                        "step": 1,
                     },
                 ),
             },
@@ -189,6 +212,7 @@ class HyperTileBleh:
         swap_size,
         max_depth,
         scale_depth,
+        interval,
         start_step,
         end_step,
     ):
@@ -200,6 +224,7 @@ class HyperTileBleh:
                 swap_size,
                 max_depth,
                 scale_depth,
+                interval,
                 start_step,
                 end_step,
             ).patch(),
