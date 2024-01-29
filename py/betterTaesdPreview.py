@@ -63,7 +63,7 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
             # Very wide images - prioritize vertical layout.
             cols = min(math.ceil(batch_size / 4), max_cols)
         else:
-            cols = min(math.ceil(batch_size / ratio / 2.0), max_cols)
+            cols = min(math.ceil(batch_size / math.ceil(ratio) / 2.0), max_cols)
         rows = math.ceil(batch_size / cols)
         return cols, rows
 
