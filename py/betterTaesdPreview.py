@@ -56,10 +56,10 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
     def calc_cols_rows(self, batch_size, width, height):
         max_cols = SETTINGS.btp_max_batch_cols
         ratio = height / width
-        if ratio >= 1.75:
+        if ratio >= 1.45:
             # Very tall images - prioritize horizontal layout.
             cols = min(batch_size, max_cols)
-        elif ratio <= 0.5:
+        elif ratio <= 0.75:
             # Very wide images - prioritize vertical layout.
             cols = min(math.ceil(batch_size / 4), max_cols)
         else:
