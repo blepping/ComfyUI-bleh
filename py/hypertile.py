@@ -55,6 +55,8 @@ class HyperTile:
         # All big divisors of value (inclusive)
         divisors = tuple(i for i in range(min_value, value + 1) if value % i == 0)
         ns = tuple(value // i for i in divisors[:max_options])  # has at least 1 element
+        if len(ns) < 2:
+            return ns[0]
         return ns[
             torch.randint(
                 generator=self.rng,
