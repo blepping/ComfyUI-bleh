@@ -5,7 +5,8 @@ A ComfyUI nodes collection... eventually.
 ## Features
 
 1. Better TAESD previews (see below)
-2. Allow setting seed and timestep range for HyperTile (look for the `BlehHyperTile` node)
+2. Allow setting seed, timestep range and step interval for HyperTile (look for the `BlehHyperTile` node)
+3. Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the the `BlehDeepShrink` node)
 
 ## Configuration
 
@@ -50,3 +51,15 @@ The node was originally taken by Comfy from taken from: https://github.com/tfern
 Then the Inspire node pack took it from the base ComfyUI node: https://github.com/ltdrdata/ComfyUI-Inspire-Pack
 
 Then I took it from the Inspire node pack. The original license was MIT so I assume yoinking it into this repo is probably okay.
+
+### BlehDeepShrink
+
+AKA `PatchModelAddDownScale` AKA Kohya Deep Shrink. Compared to the built-in Deep Shrink node this version has the
+following differences:
+
+1. Instead of choosing a block to apply the downscale effect to, you can enter a comma-separated list of blocks. This may or not actually be useful but it seems like you can get interesting effects applying it to multiple blocks. Try `2,3` or `1,2,3`.
+2. Adds a `start_fadeout_percent` input. When this is less than `end_percent` the downscale will be scaled to end at `end_percent`. For example, if `downscale_factor=2.0`, `start_percent=0.0`, `end_percent=0.5` and `start_fadeout_percent=0.0` then at 25% you could expect `downscale_factor` to be around `1.5`. This is because we are deep shrinking between 0 and 50% and we are halfway through the effect range. (`downscale_factor=1.0` would of course be a no-op and values below 1 don't seem to work.)
+
+Deep Shrink credits:
+
+Adapted from the ComfyUI source which I presume was adapted from the version Kohya initially published.
