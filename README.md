@@ -6,7 +6,7 @@ A ComfyUI nodes collection... eventually.
 
 1. Better TAESD previews (see below)
 2. Allow setting seed, timestep range and step interval for HyperTile (look for the `BlehHyperTile` node)
-3. Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the the `BlehDeepShrink` node)
+3. Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the `BlehDeepShrink` node)
 
 ## Configuration
 
