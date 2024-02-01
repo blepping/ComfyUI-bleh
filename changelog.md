@@ -5,6 +5,7 @@ Note, only relatively significant changes to user-visible functionality will be 
 ## 20240201
 
 * Added `BlehDeepShrink` node (see README for usage and description)
+* Add more upscale/downscale methods to the Deep Shrink node, allow setting a higher downscale factor, allow enabling antialiasing for `bilinear` and `bicubic` modes.
 
 ## 20240128
 

@@ -2,11 +2,19 @@
 
 import bisect
 
-from comfy.utils import common_upscale
+import torch
+from comfy.utils import bislerp
 
 
 class DeepShrinkBleh:
-    upscale_methods = ("bicubic", "nearest-exact", "bilinear", "area", "bislerp")
+    upscale_methods = (
+        "bicubic",
+        "nearest-exact",
+        "bilinear",
+        "area",
+        "bislerp",
+        "linear",
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -21,7 +29,7 @@ class DeepShrinkBleh:
                 ),
                 "downscale_factor": (
                     "FLOAT",
-                    {"default": 2.0, "min": 1.0, "max": 9.0, "step": 0.001},
+                    {"default": 2.0, "min": 1.0, "max": 32.0, "step": 0.1},
                 ),
                 "start_percent": (
                     "FLOAT",
@@ -38,6 +46,8 @@ class DeepShrinkBleh:
                 "downscale_after_skip": ("BOOLEAN", {"default": True}),
                 "downscale_method": (cls.upscale_methods,),
                 "upscale_method": (cls.upscale_methods,),
+                "antialias_downscale": ("BOOLEAN", {"default": False}),
+                "antialias_upscale": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -56,6 +66,8 @@ class DeepShrinkBleh:
         downscale_after_skip,
         downscale_method,
         upscale_method,
+        antialias_downscale,
+        antialias_upscale,
     ):
         block_numbers = tuple(
             int(x) for x in commasep_block_numbers.split(",") if x.strip()
@@ -65,6 +77,14 @@ class DeepShrinkBleh:
             raise ValueError(
                 "BlehDeepShrink: Bad value for block numbers: must be comma-separated list of numbers between 1-32",
             )
+        antialias_downscale = antialias_downscale and downscale_method in (
+            "bicubic",
+            "bilinear",
+        )
+        antialias_upscale = antialias_upscale and upscale_method in (
+            "bicubic",
+            "bilinear",
+        )
         if start_fadeout_percent < start_percent:
             start_fadeout_percent = start_percent
         elif start_fadeout_percent > end_percent:
@@ -109,23 +129,33 @@ class DeepShrinkBleh:
                     / (end_percent - start_fadeout_percent)
                 )
                 scaled_scale = 1.0 - ((1.0 - downscale_factor) * downscale_pct)
-            return common_upscale(
-                h,
+            width, height = (
                 round(h.shape[-1] * scaled_scale),
                 round(h.shape[-2] * scaled_scale),
-                downscale_method,
-                "disabled",
+            )
+            if downscale_method == "bislerp":
+                return bislerp(h, width, height)
+            return torch.nn.functional.interpolate(
+                h,
+                size=(height, width),
+                mode=downscale_method,
+                antialias=antialias_downscale,
             )
 
         def output_block_patch(h, hsp, _transformer_options):
             if h.shape[2] == hsp.shape[2]:
                 return h, hsp
-            return common_upscale(
+            if upscale_method == "bislerp":
+                return bislerp(
+                    h,
+                    hsp.shape[-1],
+                    hsp.shape[-2],
+                ), hsp
+            return torch.nn.functional.interpolate(
                 h,
-                hsp.shape[-1],
-                hsp.shape[-2],
-                upscale_method,
-                "disabled",
+                size=(hsp.shape[-2], hsp.shape[-1]),
+                mode=upscale_method,
+                antialias=antialias_upscale,
             ), hsp
 
         m = model.clone()
