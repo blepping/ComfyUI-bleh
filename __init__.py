@@ -5,11 +5,12 @@ settings.load_settings()
 if settings.SETTINGS.btp_enabled:
     from .py import betterTaesdPreview  # noqa: F401
 
-from .py import deepshrink, hypertile
+from .py import deepshrink, hypertile, sigmas
 
 NODE_CLASS_MAPPINGS = {
     "BlehHyperTile": hypertile.HyperTileBleh,
     "BlehDeepShrink": deepshrink.DeepShrinkBleh,
+    "BlehDiscardPenultimateSigma": sigmas.DiscardPenultimateSigma,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

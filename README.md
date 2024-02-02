@@ -7,6 +7,7 @@ A ComfyUI nodes collection... eventually.
 1. Better TAESD previews (see below)
 2. Allow setting seed, timestep range and step interval for HyperTile (look for the `BlehHyperTile` node)
 3. Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the `BlehDeepShrink` node)
+4. Allow discarding penultimate sigma (look for the `BlehDiscardPenultimateSigma` node). This can be useful if you find certain samplers are ruining your image by spewing a bunch of noise into it at the very end (usually only an issue with `dpm2 a` or SDE samplers).
 
 ## Configuration
 
