@@ -13,7 +13,6 @@ class DeepShrinkBleh:
         "bilinear",
         "area",
         "bislerp",
-        "linear",
     )
 
     @classmethod
@@ -94,7 +93,7 @@ class DeepShrinkBleh:
         sigma_start = model.model.model_sampling.percent_to_sigma(start_percent)
         sigma_end = model.model.model_sampling.percent_to_sigma(end_percent)
         # Arbitrary number that should have good enough precision
-        pct_steps = 200
+        pct_steps = 400
         pct_incr = 1.0 / pct_steps
         sig2pct = tuple(
             model.model.model_sampling.percent_to_sigma(x / pct_steps)
