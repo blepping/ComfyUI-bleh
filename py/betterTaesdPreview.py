@@ -58,8 +58,8 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
         ratio = height / width
         if ratio >= 1.45:
             # Very tall images - prioritize horizontal layout.
-            cols = min(batch_size, max_cols)
-        elif ratio <= 0.75:
+            cols = min(math.ceil(batch_size / 2), max_cols)
+        elif ratio <= 0.5:
             # Very wide images - prioritize vertical layout.
             cols = min(math.ceil(batch_size / 4), max_cols)
         else:
