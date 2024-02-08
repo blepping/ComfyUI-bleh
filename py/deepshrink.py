@@ -128,10 +128,13 @@ class DeepShrinkBleh:
                     / (end_percent - start_fadeout_percent)
                 )
                 scaled_scale = 1.0 - ((1.0 - downscale_factor) * downscale_pct)
+            orig_width, orig_height = h.shape[-1], h.shape[-2]
             width, height = (
-                round(h.shape[-1] * scaled_scale),
-                round(h.shape[-2] * scaled_scale),
+                round(orig_width * scaled_scale),
+                round(orig_height * scaled_scale),
             )
+            if scaled_scale >= 0.98 or width >= orig_width or height >= orig_height:
+                return h
             if downscale_method == "bislerp":
                 return bislerp(h, width, height)
             return torch.nn.functional.interpolate(
