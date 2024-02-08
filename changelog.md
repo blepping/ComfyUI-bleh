@@ -2,9 +2,13 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20240208
+
+* Added `BlehInsaneChainSampler` node.
+
 ## 20240202
 
-* Added `BlehDiscardPenultimateSigma` node
+* Added `BlehDiscardPenultimateSigma` node.
 
 ## 20240201
 

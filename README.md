@@ -5,9 +5,10 @@ A ComfyUI nodes collection... eventually.
 ## Features
 
 1. Better TAESD previews (see below)
-2. Allow setting seed, timestep range and step interval for HyperTile (look for the `BlehHyperTile` node)
-3. Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the `BlehDeepShrink` node)
+2. Allow setting seed, timestep range and step interval for HyperTile (look for the [`BlehHyperTile`](#blehhypertile) node)
+3. Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the [`BlehDeepShrink`](#blehdeepshrink) node)
 4. Allow discarding penultimate sigma (look for the `BlehDiscardPenultimateSigma` node). This can be useful if you find certain samplers are ruining your image by spewing a bunch of noise into it at the very end (usually only an issue with `dpm2 a` or SDE samplers).
+5. Allow more conveniently switching between samplers during sampling (look for the [BlehInsaneChainSampler](#blehinsanechainsampler) node).
 
 ## Configuration
 
@@ -66,3 +67,15 @@ AKA `PatchModelAddDownScale` AKA Kohya Deep Shrink. Compared to the built-in Dee
 Deep Shrink credits:
 
 Adapted from the ComfyUI source which I presume was adapted from the version Kohya initially published.
+
+### BlehInsaneChainSampler
+
+A picture is worth a thousand words, so:
+
+![Insane chain example](assets/insane_chain_example.png)
+
+This will use `heunpp2` for the first five steps, `euler_ancestral` for the next five, and `dpmpp_2m` for however many remain.
+
+This is basically the same as chaining a bunch of samplers together and manually setting the start/end steps.
+
+**Note**: Even though the `dpmpp_2m` insane chain sampler node has `steps=1` it will run for five steps. This is because the requirement of fifteen total steps must be fulfilled and... you can't really sample stuff without a sampler. Also note progress might be a little weird splitting sampling up like this.
