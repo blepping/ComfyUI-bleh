@@ -5,3 +5,5 @@ betterTaesdPreviews:
     max_batch_cols: 2
     throttle_secs: 1
     maxed_batch_step_mode: false
+    preview_device: null
+    skip_upscale_layers: 0

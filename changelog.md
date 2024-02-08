@@ -5,6 +5,7 @@ Note, only relatively significant changes to user-visible functionality will be 
 ## 20240208
 
 * Added `BlehInsaneChainSampler` node.
+* Added ability to run previews on a specific device and skip TAESD upscale layers for increased TAESD decoding performance (see README).
 
 ## 20240202
 

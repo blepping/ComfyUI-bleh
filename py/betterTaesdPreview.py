@@ -13,13 +13,28 @@ _ORIG_PREVIEWER = latent_preview.TAESDPreviewerImpl
 
 class BetterTAESDPreviewer(_ORIG_PREVIEWER):
     def __init__(self, taesd):
+        del taesd.taesd_encoder
+        if SETTINGS.btp_skip_upscale_layers > 0:
+            upscale_layers = tuple(
+                idx
+                for idx, layer in enumerate(taesd.taesd_decoder)
+                if isinstance(layer, torch.nn.Upsample)
+            )
+            for idx in range(1, min(SETTINGS.btp_skip_upscale_layers, 3) + 1):
+                taesd.taesd_decoder.pop(upscale_layers[-idx])
+        self.device = (
+            None
+            if SETTINGS.btp_preview_device is None
+            else torch.device(SETTINGS.btp_preview_device)
+        )
+        if self.device and self.device != next(taesd.parameters()).device:
+            taesd = taesd.to(self.device)
         self.taesd = taesd
         self.stamp = None
         self.cached = None
         self.blank = Image.new("RGB", size=(1, 1))
         self.stream = None
         self.prev_work = None
-        self.cpudev = torch.device("cpu")
 
     def decode_latent_to_preview_image(self, preview_format, x0):
         preview_image = self.decode_latent_to_preview(x0)
@@ -49,7 +64,10 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
                 batch_size,
                 math.ceil(batch_size / max_batch),
             )[:max_batch]
-        samples = (self.taesd.decode(x0[indexes, :]) + 1.0) / 2.0
+        x0 = x0[indexes, :]
+        if self.device and x0.device != self.device:
+            x0 = x0.to(self.device)
+        samples = (self.taesd.decode(x0) + 1.0) / 2.0
         samples = torch.clamp(samples, min=0.0, max=1.0) * 255.0
         return samples.to(dtype=torch.uint8).detach()
 
