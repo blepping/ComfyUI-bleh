@@ -7,6 +7,10 @@ from comfy.utils import bislerp
 
 
 class DeepShrinkBleh:
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+    CATEGORY = "bleh/model_patches"
+
     upscale_methods = (
         "bicubic",
         "nearest-exact",
@@ -49,10 +53,6 @@ class DeepShrinkBleh:
                 "antialias_upscale": ("BOOLEAN", {"default": False}),
             },
         }
-
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "patch"
-    CATEGORY = "bleh/model_patches"
 
     def patch(
         self,
