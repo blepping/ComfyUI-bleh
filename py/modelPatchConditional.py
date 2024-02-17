@@ -58,7 +58,11 @@ class PatchTypeTransformer:
     @torch.no_grad()
     def __call__(self, model_options, *args: list[Any]):
         result = self._call(self.get_patches(model_options), *args)
-        return result[0] if isinstance(result, (tuple, list)) and len(result) == 1 else result
+        return (
+            result[0]
+            if isinstance(result, (tuple, list)) and len(result) == 1
+            else result
+        )
 
 
 class PatchTypeTransformerReplace(PatchTypeTransformer):
@@ -115,8 +119,7 @@ class PatchTypeSamplerPostCfgFunction(PatchTypeModel):
     def _call(self, patches, opts):
         result = opts["denoised"]
         for p in patches:
-            result = p(opts)
-            opts["denoised"] = result
+            result = p(opts | {"denoised": result})
         return result
 
 
@@ -179,7 +182,6 @@ class ModelPatchConditional:
         self.start_percent = start_percent
         self.end_percent = end_percent
         self.interval = interval
-        self.patches_orig = {}
         self.base = model_default if base_on_default else model_matched
         self.base_on_default = base_on_default
         self.sigma_end = self.sigma_start = None
@@ -226,6 +228,7 @@ class ModelPatchConditional:
             # print(f">> {pt.name}, active: {matched}, step: {state.step}")
             opts = self.options_matched if matched else self.options_default
             return pt(key, opts, *args) if key else pt(opts, *args)
+
         return handler
 
     def patch(self):
