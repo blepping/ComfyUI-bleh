@@ -4,7 +4,7 @@ from typing import Any, Callable, NamedTuple
 
 import torch
 from comfy.samplers import KSAMPLER
-from tqdm import trange, tqdm
+from tqdm import tqdm
 
 
 class SamplerChain(NamedTuple):
@@ -95,3 +95,44 @@ class BlehInsaneChainSampler:
             chain = real_next
         progress.close()
         return x
+
+
+class BlehForceSeedSampler:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sampler": ("SAMPLER",),
+            },
+        }
+
+    RETURN_TYPES = ("SAMPLER",)
+    CATEGORY = "sampling/custom_sampling/samplers"
+
+    FUNCTION = "go"
+
+    def go(
+        self,
+        sampler: object,
+    ) -> tuple[KSAMPLER, SamplerChain]:
+        return (KSAMPLER(self.sampler, {"bleh_wrapped_sampler": sampler}),)
+
+    @classmethod
+    @torch.no_grad()
+    def sampler(
+        cls,
+        *args: list[Any],
+        extra_args: None | dict[str, Any] = None,
+        bleh_wrapped_sampler: object | None = None,
+        **kwargs: dict[str, Any],
+    ):
+        if not bleh_wrapped_sampler:
+            raise ValueError("wrapped sampler missing!")
+        seed = (extra_args or {}).get("seed")
+        if seed is not None:
+            torch.manual_seed(seed)
+        return bleh_wrapped_sampler.sampler_function(
+            *args,
+            extra_args=extra_args,
+            **kwargs,
+        )

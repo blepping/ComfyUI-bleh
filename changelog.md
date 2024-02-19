@@ -2,7 +2,11 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
-##20240216
+## 20240218
+
+* Added `BlehForceSeedSampler` node.
+
+## 20240216
 
 * Added `BlehModelPatchConditional` node (see README for usage and description).
 

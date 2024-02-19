@@ -12,6 +12,7 @@ NODE_CLASS_MAPPINGS = {
     "BlehDeepShrink": deepshrink.DeepShrinkBleh,
     "BlehDiscardPenultimateSigma": sigmas.DiscardPenultimateSigma,
     "BlehInsaneChainSampler": samplers.BlehInsaneChainSampler,
+    "BlehForceSeedSampler": samplers.BlehForceSeedSampler,
     "BlehModelPatchConditional": modelPatchConditional.ModelPatchConditionalNode,
 }
 
