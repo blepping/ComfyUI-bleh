@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, NamedTuple, Sequence
+from typing import Any, Callable, NamedTuple
 
 import torch
 from comfy.samplers import KSAMPLER
@@ -97,26 +97,11 @@ class BlehInsaneChainSampler:
         return x
 
 
-class WrappedKSAMPLER:
-    def __init__(self, wrapped_sampler):
-        for k in ("sampler_function", "extra_options", "inpaint_options"):
-            setattr(self, k, getattr(wrapped_sampler, k))
-        self.wrapped_sampler = wrapped_sampler
-
-    def sample(self, *args: Sequence[Any], **kwargs: dict[str, Any]):
-        seed = kwargs.get("extra_args", {}).get("seed")
-        if seed is not None:
-            torch.manual_seed(seed)
-        return self.wrapped_sampler.sample(*args, **kwargs)
-
-
 class BlehForceSeedSampler:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                "sampler": ("SAMPLER",),
-            },
+            "required": {"sampler": ("SAMPLER",)},
         }
 
     RETURN_TYPES = ("SAMPLER",)
@@ -124,5 +109,34 @@ class BlehForceSeedSampler:
 
     FUNCTION = "go"
 
-    def go(self, sampler: object) -> tuple[WrappedKSAMPLER]:
-        return (WrappedKSAMPLER(sampler),)
+    def go(
+        self,
+        sampler: object,
+    ) -> tuple[KSAMPLER, SamplerChain]:
+        return (
+            KSAMPLER(
+                self.sampler_function,
+                extra_options=sampler.extra_options | {"bleh_wrapped_sampler": sampler},
+                inpaint_options=sampler.inpaint_options | {},
+            ),
+        )
+
+    @classmethod
+    @torch.no_grad()
+    def sampler_function(
+        cls,
+        *args: list[Any],
+        extra_args: None | dict[str, Any] = None,
+        bleh_wrapped_sampler: object | None = None,
+        **kwargs: dict[str, Any],
+    ):
+        if not bleh_wrapped_sampler:
+            raise ValueError("wrapped sampler missing!")
+        seed = (extra_args or {}).get("seed")
+        if seed is not None:
+            torch.manual_seed(seed)
+        return bleh_wrapped_sampler.sampler_function(
+            *args,
+            extra_args=extra_args,
+            **kwargs,
+        )
