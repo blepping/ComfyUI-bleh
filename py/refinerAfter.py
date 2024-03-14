@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import comfy
+
 
 class BlehRefinerAfter:
     @classmethod
@@ -29,21 +31,28 @@ class BlehRefinerAfter:
         model: object,
         refiner_model: object,
     ) -> tuple[object]:
-        import comfy
-
         model = model.clone()
-        comfy.model_management.load_models_gpu([refiner_model])
-        refiner_model = self.get_real_model(refiner_model)
+        if start_timestep < 1:
+            return (model,)
+        refiner_model = refiner_model.clone()
         ms = self.get_real_model(model).model_sampling
+        real_refiner_model = None
 
         def unet_wrapper(apply_model, args):
+            nonlocal real_refiner_model
+
             inp, timestep, c = args["input"], args["timestep"], args["c"]
             curr_timestep = ms.timestep(timestep).float().max().item()
-            return (
-                refiner_model.apply_model
-                if curr_timestep <= start_timestep
-                else apply_model
-            )(inp, timestep, **c)
+            if curr_timestep > start_timestep:
+                real_refiner_model = None
+                return apply_model(inp, timestep, **c)
+            if (
+                real_refiner_model is None
+                or refiner_model.current_device != refiner_model.load_device
+            ):
+                comfy.model_management.load_models_gpu([refiner_model])
+                real_refiner_model = self.get_real_model(refiner_model)
+            return real_refiner_model.apply_model(inp, timestep, **c)
 
         model.set_model_unet_function_wrapper(unet_wrapper)
         return (model,)
