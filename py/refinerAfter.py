@@ -53,9 +53,9 @@ class BlehRefinerAfter:
 
         match time_mode:
             case "sigma":
-                if start_time <= ms.sigma_min():
+                if start_time <= ms.sigma_min:
                     return (model,)
-                if start_time >= ms.sigma_max():
+                if start_time >= ms.sigma_max:
                     return (refiner_model,)
 
                 def check_time(sigma):
