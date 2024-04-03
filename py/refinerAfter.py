@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import comfy
+import comfy.model_management as mm
 
 
 class BlehRefinerAfter:
@@ -34,10 +34,10 @@ class BlehRefinerAfter:
 
     @staticmethod
     def load_if_needed(model: object) -> bool:
-        if model.current_device != model.load_device:
-            comfy.model_management.load_models_gpu([model])
-            return True
-        return False
+        if mm.LoadedModel(model) in mm.current_loaded_models:
+            return False
+        mm.load_models_gpu([model])
+        return True
 
     def patch(  # noqa: PLR0911
         self,
