@@ -2,6 +2,10 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20240403
+
+* Added `BlehRefinerAfter` node.
+
 ## 20240218
 
 * Added `BlehForceSeedSampler` node.
