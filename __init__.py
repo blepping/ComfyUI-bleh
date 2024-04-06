@@ -22,6 +22,7 @@ NODE_CLASS_MAPPINGS = {
     "BlehForceSeedSampler": samplers.BlehForceSeedSampler,
     "BlehModelPatchConditional": modelPatchConditional.ModelPatchConditionalNode,
     "BlehRefinerAfter": refinerAfter.BlehRefinerAfter,
+    "BlehLatentUpscaleBy": deepshrink.BlehLatentUpscaleBy,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
