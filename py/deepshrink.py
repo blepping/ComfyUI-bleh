@@ -50,15 +50,15 @@ def scale_samples(
     if mode_h is None:
         mode_h = mode
     if mode in ("bicubic", "nearest-exact", "bilinear", "area"):
-        return torch.nn.functional.interpolate(
+        result = torch.nn.functional.interpolate(
             samples,
             size=(height, width),
             mode=mode,
-            antialias=antialias_size > 0,
+            antialias=antialias_size > 7,
         )
 
     result = biderp(samples, width, height, mode, mode_h)
-    if antialias_size > 0:
+    if antialias_size < 0 or antialias_size > 7:
         return result
     channels = result.shape[1]
     filt = make_filter(channels, result.dtype, antialias_size).to(result.device)
@@ -284,10 +284,6 @@ class DeepShrinkBleh:
             max(0.001, start_percent),
         )
         sigma_end = model.model.model_sampling.percent_to_sigma(end_percent)
-        sigma_min = model.model.model_sampling.percent_to_sigma(1)
-        sigma_max = model.model.model_sampling.percent_to_sigma(0.001)
-        sigma_adj = sigma_max - sigma_min
-        print("GOT", sigma_min, sigma_max, sigma_adj)
 
         # Arbitrary number that should have good enough precision
         pct_steps = 400
@@ -312,8 +308,6 @@ class DeepShrinkBleh:
                 # Sigma out of range somehow?
                 return h
             pct = pct_incr * (pct_steps - idx)
-            pct2 = 1.0 - (sigma / sigma_max)
-            print(">>>", pct, pct2, "--", sigma, sigma_start, sigma_end, sigma_adj)
             if (
                 pct < start_fadeout_percent
                 or start_fadeout_percent > end_percent
