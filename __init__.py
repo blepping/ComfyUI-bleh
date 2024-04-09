@@ -5,9 +5,10 @@ settings.load_settings()
 if settings.SETTINGS.btp_enabled:
     from .py import betterTaesdPreview  # noqa: F401
 
-from .py import (
-    deepshrink,
-    hypertile,
+from .py.nodes import (
+    blockOps,
+    deepShrink,
+    hyperTile,
     modelPatchConditional,
     refinerAfter,
     samplers,
@@ -15,14 +16,15 @@ from .py import (
 )
 
 NODE_CLASS_MAPPINGS = {
-    "BlehHyperTile": hypertile.HyperTileBleh,
-    "BlehDeepShrink": deepshrink.DeepShrinkBleh,
+    "BlehBlockOps": blockOps.BlehBlockOps,
+    "BlehDeepShrink": deepShrink.DeepShrinkBleh,
     "BlehDiscardPenultimateSigma": sigmas.DiscardPenultimateSigma,
-    "BlehInsaneChainSampler": samplers.BlehInsaneChainSampler,
     "BlehForceSeedSampler": samplers.BlehForceSeedSampler,
+    "BlehHyperTile": hyperTile.HyperTileBleh,
+    "BlehInsaneChainSampler": samplers.BlehInsaneChainSampler,
+    "BlehLatentUpscaleBy": blockOps.BlehLatentUpscaleBy,
     "BlehModelPatchConditional": modelPatchConditional.ModelPatchConditionalNode,
     "BlehRefinerAfter": refinerAfter.BlehRefinerAfter,
-    "BlehLatentUpscaleBy": deepshrink.BlehLatentUpscaleBy,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
