@@ -115,3 +115,7 @@ Allows switching to a refiner model at a predefined time. There are three time m
 **Note**: This only patches the unet apply function, most other stuff including conditioning comes from the base model so
 you likely can only use this to swap between models that are closely related. For example, switching from SD 1.5 to
 SDXL is not going to work at all.
+
+## Credits
+
+Latent blending and scaling and filter functions based on implementation from https://github.com/WASasquatch/FreeU_Advanced - thanks!

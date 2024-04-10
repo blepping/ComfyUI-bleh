@@ -6,23 +6,24 @@ if settings.SETTINGS.btp_enabled:
     from .py import betterTaesdPreview  # noqa: F401
 
 from .py.nodes import (
-    blockOps,
     deepShrink,
     hyperTile,
     modelPatchConditional,
+    ops,
     refinerAfter,
     samplers,
     sigmas,
 )
 
 NODE_CLASS_MAPPINGS = {
-    "BlehBlockOps": blockOps.BlehBlockOps,
+    "BlehBlockOps": ops.BlehBlockOps,
     "BlehDeepShrink": deepShrink.DeepShrinkBleh,
     "BlehDiscardPenultimateSigma": sigmas.DiscardPenultimateSigma,
     "BlehForceSeedSampler": samplers.BlehForceSeedSampler,
     "BlehHyperTile": hyperTile.HyperTileBleh,
     "BlehInsaneChainSampler": samplers.BlehInsaneChainSampler,
-    "BlehLatentUpscaleBy": blockOps.BlehLatentUpscaleBy,
+    "BlehLatentScaleBy": ops.BlehLatentScaleBy,
+    "BlehLatentOps": ops.BlehLatentOps,
     "BlehModelPatchConditional": modelPatchConditional.ModelPatchConditionalNode,
     "BlehRefinerAfter": refinerAfter.BlehRefinerAfter,
 }
