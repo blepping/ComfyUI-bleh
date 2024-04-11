@@ -12,6 +12,7 @@ A ComfyUI nodes collection... eventually.
 6. Apply arbitrary model patches at an interval and/or for a percentage of sampling (look for the [BlehModelPatchConditional](#blehmodelpatchconditional) node).
 7. Ensure a seed is set even when `add_noise` is turned off in a sampler. Yes, that's right: if you don't have `add_noise` enabled _no_ seed gets set for samplers like `euler_a` and it's not possible to reproduce generations. (look for the [BlehForceSeedSampler](#blehforceseedsampler) node)
 8. Allows swapping to a refiner model at a predefined time (look for the [BlehRefinerAfter](#blehrefinerafter) node).
+9. Allow defining arbitrary model patches (look for the [BlehBlockOps](#blehblockops) node).
 
 ## Configuration
 
@@ -115,6 +116,242 @@ Allows switching to a refiner model at a predefined time. There are three time m
 **Note**: This only patches the unet apply function, most other stuff including conditioning comes from the base model so
 you likely can only use this to swap between models that are closely related. For example, switching from SD 1.5 to
 SDXL is not going to work at all.
+
+### BlehBlockOps
+
+Very experimental advanced node that allows defining model patches using YAML. This node is still under development and may be changed.
+
+**Note**: ComfyUI seems to strip out curly braces so you can't use YAML's inline object notation.
+
+The top level YAML should consist of a list of objects with a condition `if`, a list of `ops` that run if the condition succeeds.
+Objects `then` and `else` also take the same form as the top level object and apply when the `if` condition matches (or not in the case of `else`).
+
+All object fields (`if`, `then`, `else`, `ops`) are optional. An empty object is valid, it just doesn't do anything.
+
+```yaml
+- if:
+    cond1: [value1, value2]
+    cond2: value # Values may be specified as a list or single item.
+  ops: [[opname1, oparg1, oparg2], [opname2, oparg1, oparg2]]
+  then:
+    if: [[opname1, oparg1, oparg2]] # Conditions may also be specified as a list.
+    ops: [] # and so on
+    else:
+      ops: []
+    # then and else may also be nested to an arbitrary depth.
+```
+
+*Note*: Blocks match by default, conditions restrict them. So a block with no `if` matches everything.
+
+<details>
+
+<summary>Expand to see full node documentation</summary>
+
+#### Conditions
+
+**`type`**: One of `input`, `input_after_skip`, `middle`, `output`, `latent`, `post_cfg`.
+
+**`block`**: The block number. Only applies when type is `input`, `input_after_skip`, `middle` or `output`.
+
+**`stage`**: The model stage. Applies to the same types as `block`. You can think of this in terms of FreeU's `b1`, `b2` - the number is the stage.
+
+**`from_percent`**: Matches when sampling is greater or equal to the percent. Note that this is sampling percentage, not percentage of steps.
+Does not apply to type `latent`.
+
+**`to_percent`**: Matches when sampling is less or equal to the percent. Same restrictions as `from_percent`.
+
+**`step`**: Only applies when sigmas are connected to the `BlehBlockOps` node. A step will be determined as the index of the closest
+matching sigma. In other words, if you don't connect sigmas that exactly match the sigmas used for sampling you won't get accurate steps.
+Does not apply to type `latent`.
+
+**`from_step`**: As above, but matches when the step is greater or equal to the value.
+
+**`from_step`**: As above, but matches when the step is less or equal to the value.
+
+**`step_interval`**: Same restrictions as the other step condition types. Matches when the step modulus interval is 0. In other words,
+every other step starting from the first step you'd use an interval of `2` and the `then` branch (since `1 % 2 == 1` which is not 0).
+
+#### Operations
+
+Operations mostly modify a target which can be `h` or `hsp`. `hsp` is only a valid target when `type` is `output`. I think it has something
+to do with skip connections but I don't know the specifics. It's important for FreeU.
+
+**`slice`**: Applies a filtering operation on a slice of the target.
+
+1. scale: Slice scale, `1.0` would mean apply to 100% of the target, `0.5` would mean 50% of it.
+2. strength: Scales the target. `1.0` would mean 100%.
+3. blend ratio: Ratio of the transformed value to blend in. `1.0` means replace it with no blending.
+4. blend mode: See the blend mode section.
+5. hidden mean: No idea what this does really, but FreeU V2 uses it when slicing and V1 doesn't.
+
+**`ffilter`**: Applies a Fourier filter operation to the target.
+
+1. scale: Scales the target. `1.0` would mean 100%.
+2. filter: May be a string with a predefined filter name or a list of lists defining filters. See the filter section.
+3. strength: Strength of the filter. `1.0` would mean to apply it at 100%.
+4. threshold: Threshold for the Fourier filter. This generally should be 1.
+
+**`scale_torch`**: Scales the target up or down, using PyTorch's `interpolate` function.
+
+1. type: One of `bicubic`, `nearest`, `bilinear` or `area`.
+2. scale width: Ratio to scale the width. `2.0` would mean double it, `0.5` would mean half of it.
+3. scale height: As above.
+4. antialias: `true` to apply antialiasing after scaling or `false`.
+
+**`unscale_torch`**: Scale the target to be the same size as `hsp`. Only can be used when the target isn't `hsp` and condition `type` is `output`.
+Can be used to reverse a `scale` or `scale_torch` operation without having to worry about calculating the ratios to get the original size back.
+
+1. type: Same as `scale_torch`.
+2. antialias: Same as `scale_torch`.
+
+**`scale`**: Scales the target up or down using various functions. See the scaling functions section.
+
+1. type width: Scaling function to use for width. Note if the type is one of the ones from `scale_torch` it cannot be combined with other scaling functions.
+2. type height: As above.
+3. scale width: Ratio to scale the width. `2.0` would mean double it, `0.5` would mean half of it.
+4. scale height: As above.
+5. antialias size: Size of the antialias kernel. Between 1 and 7 inclusive. Higher numbers seem to increase blurriness.
+
+**`unscale`**: Like `unscale_torch` except it supports more scale functions and can specify width/height scale function independently.
+Same restriction as `scale`.
+
+1. type width: Scaling function to use for width. Note if the type is one of the ones from `scale_torch` it cannot be combined with other scaling functions.
+2. type height: As above.
+3. antialias size: Size of the antialias kernel. Between 1 and 7 inclusive. Higher numbers seem to increase blurriness.
+
+**`flip`**: Flips the target.
+
+1. direction: `h` for horizontal flip, `v` for vertical. Note that latents generally don't tolerate being flipped very well.
+
+**`rot90`**: Does a 90 degree rotation of the target.
+
+1. count: Number of times to rotate (can also be negative). Note that if you rotate in a way that makes the tensors not match then stuff will probably break.
+   also as with `flip` it generally is pretty destructive to latents.
+
+**`roll`**: Rotates the values in a dimension of the target.
+
+1. direction: `horizontal`, `vertical`, `channels`. Note that when `type` is `input`, `input_after_skip`, `middle` or `output` you aren't actually dealing
+   with a latent. The second dimension ("channels") is actually the features in the layer. Rotating them can produce some pretty weird effects.
+2. amount: If it's a number greater than `-1.0` and less than `1.0` this will rotate forward or backward by a percentage of the size. Otherwise it is
+   interpreted as the number of items to rotate forward or backward.
+
+**`roll_channels`**: Same as `roll` but you only specify the count, it always targets channels and you can't use percentages.
+
+1. count: Number of channels to rotate. May be negative.
+
+**`target_skip`**: Changes the target.
+
+1. If `true` will target `hsp`, otherwise will target `h`. Targeting `hsp` is only allowed when `type` is `output`.
+
+**`multiply`**: Multiply the target by the value.
+
+1. value: Multiplier. `2.0` would double all values in the target.
+
+**`antialias`**: Applies an antialias effect to the target. Works the same ase with `scale`.
+
+1. antialias size: A number between 1 and 7.
+
+**`noise`**: Adds noise to the target. Can only be used when sigmas are connected. Noise will be scaled by `sigma - sigma_next`.
+
+1. scale: Additionally scale the noise by the supplied factor. `1.0` would mean no scaling, `2.0` would double it, etc.
+
+**`debug`**: Outputs some debug information about the state.
+
+**`blend_op`**: Allows applying a blend function to the result of another operation.
+
+1. blend ratio: Ratio of the transformed value to blend in.
+2. blend mode: See the blend mode section.
+3. op: The operation as a list, with the name first. i.e. `[blend_op, 0.5, inject, [multiply, 0.5]]`
+
+
+#### Blend Modes
+
+1. bislerp: Interpolates between tensors a and b using normalized linear interpolation.
+2. colorize: Supposedly transfers color. May or may not work that way.
+3. cosinterp: Cosine interpolation.
+4. cuberp
+5. hslerp: Hybrid Spherical Linear Interporation, supposedly smooths transitions between orientations and colors.
+6. inject: Inject just adds the value scaled by the ratio, so if ratio is `1.0` this simply adds it.
+7. lerp: Linear interpolation.
+8. lineardodge: Supposedly simulates a brightning effect.
+
+#### Filters
+
+1. none
+2. bandpass
+3. lowpass: Allows low frequencies and suppresses high frequencies.
+4. highpass: Allows high frequencies and suppresses low frequencies.
+5. passthrough: Maybe doesn't do anything?
+6. gaussianblur: Blur.
+7. edge: Edge enhance.
+8. sharpen: Sharpens the target.
+9. multilowpass: The multi versions apply to multiple bands.
+10. multihighpass
+11. multipassthrough
+12. multigaussianblur
+13. multiedge
+14. multisharpen
+
+Custom filters may also be defined. For example, `gaussianblur` in the YAML filter definition would be `[[10,0.5]]`,
+`sharpen` would be `[[10, 1.5]]`.
+
+#### Scaling Functions
+
+1. bicubic: Generally the best option.
+2. bilinear
+3. nearest-exact
+4. area
+5. bislerp: Interpolates between tensors a and b using normalized linear interpolation.
+6. colorize: Supposedly transfers color. May or may not work that way.
+7. hslerp: Hybrid Spherical Linear Interporation, supposedly smooths transitions between orientations and colors.
+8. bibislerp: Uses bislerp as the slerp function in bislerp. When slerping once just isn't enough.
+9. cosinterp: Cosine interpolation.
+10. cuberp: Cubic interpolation.
+11. inject: Adds the value scaled by the ratio. Probably not the best for scaling.
+12. lineardodge: Supposedly simulates a brightning effect.
+
+#### Examples
+
+**FreeU V2**
+
+```yaml
+# FreeU V2 b1=1.1, b2=1.2, s1=0.9, s2=0.2
+- if:
+    type: output
+    stage: 1
+  ops:
+    - [slice, 0.75, 1.1, 1, null, true]
+    - [target_skip, true]
+    - [ffilter, 0.9, none, 1.0, 1]
+- if:
+    type: output
+    stage: 2
+  ops:
+    - [slice, 0.75, 1.2, 1, null, true]
+    - [target_skip, true]
+    - [ffilter, 0.2, none, 1.0, 1]
+```
+
+**Kohya Deep Shrink**
+
+```yaml
+# Deep Shrink, downscale 2, apply up to 35%.
+- if:
+    type: input_after_skip
+    block: 3
+    to_percent: 0.35
+  ops: [[scale, bicubic, bicubic, 0.5, 0.5, 0]]
+- if:
+    type: output
+  ops: [[unscale, bicubic, bicubic, 0]]
+```
+
+</details>
+
+### BlehLatentOps
+
+Basically the same as BlehBlockOps, except the condition `type` will be `latent`. Obviously stuff involving steps, percentages, etc does not apply.
+This node allows you to apply the blending/filtering/scaling operations to a latent.
 
 ## Credits
 

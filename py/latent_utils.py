@@ -183,7 +183,6 @@ UPSCALE_METHODS = (
     "bilinear",
     "area",
     "bislerp",
-    "bislerp_alt",
     "colorize",
     "hslerp",
     "bibislerp",

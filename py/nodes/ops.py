@@ -252,7 +252,11 @@ class BlockOp:
             case OpType.ANTIALIAS:
                 out = antialias_tensor(t, self.args[0])
             case OpType.NOISE:
-                noise = torch.randn_like(t)
+                # mask = torch.ones(t.shape[2:], device=t.device, dtype=t.dtype)
+                # ms = 32
+                # mask[ms:-ms, :] = 0
+                # mask[:, ms:-ms] = 0
+                noise = torch.randn_like(t)  # * mask
                 step_scale = state["sigma"] - state["sigma_next"]
                 t += noise * step_scale * self.args[0]
             case OpType.DEBUG:
