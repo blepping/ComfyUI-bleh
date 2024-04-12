@@ -525,11 +525,11 @@ class BlehBlockOps:
             if sigmas_opt is None:
                 state[Condtype.STEP_EXACT] = state[CondType.STEP] = -1
                 return st
-            sigmadiff, idx = torch.min(torch.abs(sigmas_opt - sigma), 0)
+            sigmadiff, idx = torch.min(torch.abs(sigmas_opt[:-1] - sigma), 0)
             idx = idx.item()
             state |= {
                 CondType.STEP: idx + 1,
-                CondType.STEP_EXACT: -1 if sigmadiff.item() != 0 else idx + 1,
+                CondType.STEP_EXACT: -1 if sigmadiff.item() > 1.5e-06 else idx + 1,
                 "sigma": sigmas_opt[idx].item(),
                 "sigma_next": sigmas_opt[idx + 1].item(),
             }
