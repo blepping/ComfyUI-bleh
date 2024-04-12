@@ -2,6 +2,10 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20240412
+
+* Added `BlehBlockOps` and `BlehLatentOps` nodes.
+
 ## 20240403
 
 * Added `BlehRefinerAfter` node.

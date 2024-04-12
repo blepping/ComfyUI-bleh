@@ -121,7 +121,7 @@ SDXL is not going to work at all.
 
 Very experimental advanced node that allows defining model patches using YAML. This node is still under development and may be changed.
 
-**Note**: ComfyUI seems to strip out curly braces so you can't use YAML's inline object notation.
+**Note**: ComfyUI seems to strip out curly braces so you can't use YAML's inline object notation. You can use `<` and `>` instead.
 
 The top level YAML should consist of a list of objects with a condition `if`, a list of `ops` that run if the condition succeeds.
 Objects `then` and `else` also take the same form as the top level object and apply when the `if` condition matches (or not in the case of `else`).
@@ -149,14 +149,19 @@ All object fields (`if`, `then`, `else`, `ops`) are optional. An empty object is
 
 #### Conditions
 
-**`type`**: One of `input`, `input_after_skip`, `middle`, `output`, `latent`, `post_cfg`.
+**`type`**: One of `input`, `input_after_skip`, `middle`, `output` (preceding are block patches), `latent`, `post_cfg`.
+**Note**: ComfyUI doesn't allow patching the middle blocks by default, this feature is only available if you have
+[FreeU Advanced](https://github.com/WASasquatch/FreeU_Advanced) installed and enabled. (It patches ComfyUI to support patching
+the middle blocks.)
 
 **`block`**: The block number. Only applies when type is `input`, `input_after_skip`, `middle` or `output`.
 
 **`stage`**: The model stage. Applies to the same types as `block`. You can think of this in terms of FreeU's `b1`, `b2` - the number is the stage.
 
-**`from_percent`**: Matches when sampling is greater or equal to the percent. Note that this is sampling percentage, not percentage of steps.
+**`percent`**: Percentage of sampling completed as a number between `0.0` and `1.0`. Note that this is sampling percentage, not percentage of steps.
 Does not apply to type `latent`.
+
+**`from_percent`**: Matches when sampling is greater or equal to the percent. Same restrictions as `percent`.
 
 **`to_percent`**: Matches when sampling is less or equal to the percent. Same restrictions as `from_percent`.
 
@@ -164,12 +169,43 @@ Does not apply to type `latent`.
 matching sigma. In other words, if you don't connect sigmas that exactly match the sigmas used for sampling you won't get accurate steps.
 Does not apply to type `latent`.
 
+**`step_exact`**: Same restrictions as `step`, however will only be set if the current sigma _exactly_ matches a step. Otherwise the
+value will be `-1`.
+
 **`from_step`**: As above, but matches when the step is greater or equal to the value.
 
 **`from_step`**: As above, but matches when the step is less or equal to the value.
 
 **`step_interval`**: Same restrictions as the other step condition types. Matches when the step modulus interval is 0. In other words,
 every other step starting from the first step you'd use an interval of `2` and the `then` branch (since `1 % 2 == 1` which is not 0).
+
+**`cond`**: Generic condition, has two forms:
+
+*Comparison*: Takes three arguments: comparison type (`eq`, `ne`, `gt`, `lt`, `ge`, `le`), a condition type with
+a numeric value (`block`, `stage`, `percent`, `step`, `step_exact`) and a value or list of values to compare with.
+
+Example:
+```yaml
+- if: [cond, [lt, percent, 0.35]]
+```
+
+*Logic*: Takes a logic operation type (`not`, `and`, `or`) and a list of condition blocks. **Note**: The logic operation is applied
+to the result of the condition block and not the fields within it.
+
+Example:
+```yaml
+- if:
+    cond: [not,
+      [cond, [or,
+        [cond, [lt, step, 1]],
+        [cond, [gt, step, 5]],
+      ]]
+    ] # A verbose way of expressing step >= 1 and step <= 5
+- if:
+    - [cond, [ge, step, 1]]
+    - [cond, [le, step, 5]] # Same as above
+- if: [[from_step, 1], [to_step, 5]] # Also same as above
+```
 
 #### Operations
 
@@ -241,7 +277,7 @@ Same restriction as `scale`.
 
 **`target_skip`**: Changes the target.
 
-1. If `true` will target `hsp`, otherwise will target `h`. Targeting `hsp` is only allowed when `type` is `output`.
+1. If `true` will target `hsp`, otherwise will target `h`. Targeting `hsp` is only allowed when `type` is `output`, no effect otherwise.
 
 **`multiply`**: Multiply the target by the value.
 
@@ -261,8 +297,42 @@ Same restriction as `scale`.
 
 1. blend ratio: Ratio of the transformed value to blend in.
 2. blend mode: See the blend mode section.
-3. op: The operation as a list, with the name first. i.e. `[blend_op, 0.5, inject, [multiply, 0.5]]`
+3. ops: The operation as a list, with the name first. i.e. `[blend_op, 0.5, inject, [multiply, 0.5]]`. May also be a list of operations.
 
+**`mask_example_op`**: Applies providing a mask by example and masks the result of an operation or list of operations.
+
+1. scale type: Same as with `scale`.
+2. antialias size: Same as with `scale`.
+3. mask: A two dimensional list of mask values. See below.
+4. ops: Same as with `blend_op`.
+
+Simple example of a mask:
+
+```plaintext
+[ [1.0, 0.0, 0.0, 1.0],
+  [0.0, 0.0, 0.0, 0.0],
+  [1.0, 0.0, 0.0, 1.0],
+]
+```
+
+With this mask, the result of the mask ops will be applied at full strength to the corners. The mask is scaled up to
+the size of the target tensor, so with this example the masked corners will be proportionately quite large if the
+latent or tensor is much bigger than the mask. There are two convenience tricks for defining larger masks without
+having to specify each value:
+
+* If the first element in a row is `"rep"` then the second element is interpreted as a row repeat count and the
+  rest of the items in the row constitute the row. Ex: `["rep", 2, 1, 0, 1]` expands to two rows of `1, 0, 1`.
+* If a column item is a list, the first element is interpreted as the repeat count and the second as the element
+  - the rest is ignored. Ex: `[3, 1.2]` as a column would expand to `1.2, 1.2, 1.2`.
+
+These two shortcuts can be combined. A mask of `[["rep", 2, 1, [3, 0], 2]]` expands to:
+
+```plaintext
+[
+  [1, 0, 0, 0, 2],
+  [1, 0, 0, 0, 2],
+]
+```
 
 #### Blend Modes
 
