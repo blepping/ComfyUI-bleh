@@ -283,7 +283,7 @@ class Operation:
                     amount = int(t.shape[dims[0]] * amount)
                 out = torch.roll(t, amount, dims=dims)
             case OpType.TARGET_SKIP:
-                if get(state, "hsp") is None:
+                if state.get("hsp") is None:
                     if state["target"] == "hsp":
                         state["target"] = "h"
                     return
