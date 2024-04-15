@@ -121,8 +121,6 @@ SDXL is not going to work at all.
 
 Very experimental advanced node that allows defining model patches using YAML. This node is still under development and may be changed.
 
-**Note**: ComfyUI seems to strip out curly braces so you can't use YAML's inline object notation. You can use `<` and `>` instead.
-
 The top level YAML should consist of a list of objects with a condition `if`, a list of `ops` that run if the condition succeeds.
 Objects `then` and `else` also take the same form as the top level object and apply when the `if` condition matches (or not in the case of `else`).
 

@@ -457,9 +457,7 @@ class Rule:
 
 class RuleGroup:
     @classmethod
-    def from_yaml(cls, s: str, curlybrace_hack=True) -> object:
-        if curlybrace_hack:
-            s = s.replace("<", "{").replace(">", "}")
+    def from_yaml(cls, s: str) -> object:
         parsed_rules = yaml.safe_load(s)
         return cls(tuple(Rule.from_dict(r)[0] for r in parsed_rules))
 
@@ -485,7 +483,7 @@ class BlehBlockOps:
         return {
             "required": {
                 "model": ("MODEL",),
-                "rules": ("STRING", {"multiline": True}),
+                "rules": ("STRING", {"multiline": True, "dynamicPrompts": False}),
             },
             "optional": {
                 "sigmas_opt": ("SIGMAS",),
@@ -523,8 +521,8 @@ class BlehBlockOps:
 
         def set_state_step(state, sigma):
             if sigmas_opt is None:
-                state[Condtype.STEP_EXACT] = state[CondType.STEP] = -1
-                return st
+                state[CondType.STEP_EXACT] = state[CondType.STEP] = -1
+                return state
             sigmadiff, idx = torch.min(torch.abs(sigmas_opt[:-1] - sigma), 0)
             idx = idx.item()
             state |= {
@@ -659,7 +657,7 @@ class BlehLatentOps:
         return {
             "required": {
                 "samples": ("LATENT",),
-                "rules": ("STRING", {"multiline": True}),
+                "rules": ("STRING", {"multiline": True, "dynamicPrompts": False}),
             },
         }
 
