@@ -8,17 +8,19 @@ if settings.SETTINGS.btp_enabled:
 from .py.nodes import (
     deepShrink,
     hyperTile,
+    misc,
     modelPatchConditional,
     ops,
     refinerAfter,
     samplers,
-    sigmas,
 )
 
 NODE_CLASS_MAPPINGS = {
     "BlehBlockOps": ops.BlehBlockOps,
     "BlehDeepShrink": deepShrink.DeepShrinkBleh,
-    "BlehDiscardPenultimateSigma": sigmas.DiscardPenultimateSigma,
+    "BlehDiscardPenultimateSigma": misc.DiscardPenultimateSigma,
+    "BlehDisableNoise": misc.BlehDisableNoise,
+    "BlehPlug": misc.BlehPlug,
     "BlehForceSeedSampler": samplers.BlehForceSeedSampler,
     "BlehHyperTile": hyperTile.HyperTileBleh,
     "BlehInsaneChainSampler": samplers.BlehInsaneChainSampler,

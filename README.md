@@ -10,7 +10,7 @@ A ComfyUI nodes collection... eventually.
 4. Allow discarding penultimate sigma (look for the `BlehDiscardPenultimateSigma` node). This can be useful if you find certain samplers are ruining your image by spewing a bunch of noise into it at the very end (usually only an issue with `dpm2 a` or SDE samplers).
 5. Allow more conveniently switching between samplers during sampling (look for the [BlehInsaneChainSampler](#blehinsanechainsampler) node).
 6. Apply arbitrary model patches at an interval and/or for a percentage of sampling (look for the [BlehModelPatchConditional](#blehmodelpatchconditional) node).
-7. Ensure a seed is set even when `add_noise` is turned off in a sampler. Yes, that's right: if you don't have `add_noise` enabled _no_ seed gets set for samplers like `euler_a` and it's not possible to reproduce generations. (look for the [BlehForceSeedSampler](#blehforceseedsampler) node)
+7. Ensure a seed is set even when `add_noise` is turned off in a sampler. Yes, that's right: if you don't have `add_noise` enabled _no_ seed gets set for samplers like `euler_a` and it's not possible to reproduce generations. (look for the [BlehForceSeedSampler](#blehforceseedsampler) node). For `SamplerCustomAdvanced` you can use `BlehDisableNoise` to accomplish the same thing.
 8. Allows swapping to a refiner model at a predefined time (look for the [BlehRefinerAfter](#blehrefinerafter) node).
 9. Allow defining arbitrary model patches (look for the [BlehBlockOps](#blehblockops) node).
 
@@ -102,6 +102,14 @@ This is basically the same as chaining a bunch of samplers together and manually
 
 Currently, the way ComfyUI's advanced and custom samplers work is if you turn off `add_noise` _no_ global RNG seed gets set. Samplers like `euler_a` use this (SDE samplers use a different RNG method and aren't subject to this issue). Anyway, the upshot is you will get a different generation every time regardless of what the seed is set to. This node simply wraps another sampler and ensures that the seed gets set.
 
+### BlehDisableNoise
+
+Basically the same idea as `BlehForceSeedSampler`, however it is usable with `SamplerCustomAdvanced`.
+
+
+### BlehPlug
+
+You can connect this node to any input and it will be the same as if the input had no connection. Why is this useful? It's mainly for [Use Everywhere](https://github.com/chrisgoringe/cg-use-everywhere) — sometimes it's desirable to leave an input unconnected, but if you have Use Everywhere broadcasting an output it can be inconvenient. Just shove a plug in those inputs.
 
 ### BlehRefinerAfter
 

@@ -2,8 +2,7 @@
 
 import bisect
 
-import torch
-from comfy.utils import bislerp
+from .. import latent_utils  # noqa: TID252
 
 
 class DeepShrinkBleh:
@@ -47,8 +46,8 @@ class DeepShrinkBleh:
                     {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.001},
                 ),
                 "downscale_after_skip": ("BOOLEAN", {"default": True}),
-                "downscale_method": (cls.upscale_methods,),
-                "upscale_method": (cls.upscale_methods,),
+                "downscale_method": (latent_utils.UPSCALE_METHODS,),
+                "upscale_method": (latent_utils.UPSCALE_METHODS,),
                 "antialias_downscale": ("BOOLEAN", {"default": False}),
                 "antialias_upscale": ("BOOLEAN", {"default": False}),
             },
@@ -135,29 +134,23 @@ class DeepShrinkBleh:
             )
             if scaled_scale >= 0.98 or width >= orig_width or height >= orig_height:
                 return h
-            if downscale_method == "bislerp":
-                return bislerp(h, width, height)
-            return torch.nn.functional.interpolate(
+            return latent_utils.scale_samples(
                 h,
-                size=(height, width),
+                width,
+                height,
                 mode=downscale_method,
-                antialias=antialias_downscale,
+                antialias_size=3 if antialias_downscale else 0,
             )
 
         def output_block_patch(h, hsp, _transformer_options):
             if h.shape[2] == hsp.shape[2]:
                 return h, hsp
-            if upscale_method == "bislerp":
-                return bislerp(
-                    h,
-                    hsp.shape[-1],
-                    hsp.shape[-2],
-                ), hsp
-            return torch.nn.functional.interpolate(
+            return latent_utils.scale_samples(
                 h,
-                size=(hsp.shape[-2], hsp.shape[-1]),
+                hsp.shape[-1],
+                hsp.shape[-2],
                 mode=upscale_method,
-                antialias=antialias_upscale,
+                antialias_size=3 if antialias_upscale else 0,
             ), hsp
 
         m = model.clone()

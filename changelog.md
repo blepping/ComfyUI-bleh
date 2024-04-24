@@ -2,6 +2,11 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20240423
+
+* Added `BlehPlug` and `BlehDisableNoise` (see README for usage and description).
+* Increased the available upscale/downscale types for `BlehDeepShrink`.
+
 ## 20240412
 
 * Added `BlehBlockOps` and `BlehLatentOps` nodes.
