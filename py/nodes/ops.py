@@ -498,7 +498,7 @@ class OpTargetSkip(Operation):
                 state["target"] = "h"
             return t
         state["target"] = "hsp" if self.args[0] is True else "h"
-        return t
+        return state[state["target"]]
 
 
 class OpMultiply(Operation):
