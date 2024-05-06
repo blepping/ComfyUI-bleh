@@ -100,7 +100,7 @@ class DeepShrinkBleh:
         )
 
         def input_block_patch(h, transformer_options):
-            sigma = transformer_options["sigmas"][0].item()
+            sigma = transformer_options["sigmas"][0].cpu().item()
             if (
                 sigma > sigma_start
                 or sigma < sigma_end
@@ -140,17 +140,20 @@ class DeepShrinkBleh:
                 height,
                 mode=downscale_method,
                 antialias_size=3 if antialias_downscale else 0,
+                sigma=sigma,
             )
 
-        def output_block_patch(h, hsp, _transformer_options):
-            if h.shape[2] == hsp.shape[2]:
+        def output_block_patch(h, hsp, transformer_options):
+            if h.shape[-2:] == hsp.shape[-2:]:
                 return h, hsp
+            sigma = transformer_options["sigmas"][0].cpu().item()
             return latent_utils.scale_samples(
                 h,
                 hsp.shape[-1],
                 hsp.shape[-2],
                 mode=upscale_method,
                 antialias_size=3 if antialias_upscale else 0,
+                sigma=sigma,
             ), hsp
 
         m = model.clone()

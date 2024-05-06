@@ -1,5 +1,7 @@
 from .py import settings
 
+BLEH_VERSION = 0
+
 settings.load_settings()
 
 if settings.SETTINGS.btp_enabled:
@@ -35,4 +37,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BlehDeepShrink": "Kohya Deep Shrink (bleh)",
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "BLEH_VERSION"]
