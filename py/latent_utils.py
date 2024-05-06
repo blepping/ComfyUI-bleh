@@ -3,6 +3,7 @@
 
 import math
 
+import kornia.filters as kf
 import numpy as np
 import torch
 from torch import fft
@@ -126,6 +127,10 @@ BLENDING_MODES = {
     # Simulates a brightening effect by adding tensor b to tensor a, scaled by t.
     "lineardodge": lambda a, b, t: normalize(a + b * t),
 }
+for k in tuple(BLENDING_MODES.keys()):
+    if k == "hslerp":
+        continue
+    BLENDING_MODES[f"rev{k}"] = lambda a, b, t, f=BLENDING_MODES[k]: f(b, a, t)
 
 FILTER_PRESETS = {
     "none": (),
@@ -177,20 +182,59 @@ FILTER_PRESETS = {
     "multisharpen": ((5, 1.5), (10, 2.0), (15, 2.5)),  # Multi-scale sharpening
 }
 
+
+BIDERP_MODES = {k: v for k, v in BLENDING_MODES.items() if not k.endswith("slerp")}
+BIDERP_MODES |= {
+    "hslerp": hslerp_alt,
+    "bislerp": slerp_orig,
+    "bibislerp": BLENDING_MODES["bislerp"],
+    "revhslerp": lambda a, b, t, f=hslerp_alt: f(b, a, t),
+    "revbislerp": lambda a, b, t, f=slerp_orig: f(b, a, t),
+    "revbibislerp": BLENDING_MODES["revbislerp"],
+}
+
+
 UPSCALE_METHODS = (
     "bicubic",
     "nearest-exact",
     "bilinear",
     "area",
-    "bislerp",
+    *BIDERP_MODES.keys(),
+    *(
+        f"{meth}+{enh}"
+        for meth in ("bicubic", "bislerp", "hslerp", "random")
+        for enh in (
+            "lowpass",
+            "highpass",
+            "bandpass",
+            "randhilowpass",
+            "randmultihilowpass",
+            "randhibandpass",
+            "randlowbandpass",
+            "gaussianblur",
+            "edge",
+            "sharpen",
+            "korniabilateralblur",
+            "korniagaussianblur",
+            "korniasharpen",
+            "korniaedge",
+            "korniarevedge",
+            "korniarandblursharp",
+            "renoise1",
+            "renoise2",
+        )
+    ),
+    "random",
+    "randomaa",
+)
+
+
+RAND_UPSCALE_METHODS = (
+    "bicubic",
     "colorize",
-    "hslerp",
-    "bibislerp",
-    "cosinterp",
-    "cuberp",
-    "inject",
-    "lerp",
-    "lineardodge",
+    "bislerp",
+    "revcosinterp",
+    "bilinear",
 )
 
 FILTER_SIZES = (
@@ -217,6 +261,75 @@ def antialias_tensor(x, antialias_size):
     return torch.nn.functional.conv2d(x, filt, groups=channels, padding="same")
 
 
+def enhance_tensor(x, name, scale=1.0, sigma=None):  # noqa: PLR0911
+    randitems = None
+    match name:
+        case "randmultihilowpass":
+            scale *= 0.1
+            randskip = 4
+            randitems = ("multilowpass", "multihighpass")
+        case "randhilowpass":
+            scale *= 0.1
+            randskip = 6
+            randitems = ("lowpass", "highpass")
+        case "randlowbandpass":
+            scale *= 0.25
+            randskip = 1
+            randitems = ("lowpass", "multilowpass", "bandpass")
+        case "randhibandpass":
+            scale *= 0.25
+            randskip = 1
+            randitems = ("highpass", "multihighpass", "bandpass")
+        case "bandpass":
+            scale *= 0.2
+        case "renoise1" | "renoise2":
+            if sigma is None:
+                return x
+            noise_scale = (
+                min(sigma / 6.0, 2.0 / max(sigma, 1e-05))
+                if name == "renoise1"
+                else sigma / 8.0
+            )
+            if noise_scale < 1e-04:
+                return x
+            noise = torch.randn_like(x)
+            return noise.mul_(noise_scale).add_(x)
+    if randitems:
+        ridx = torch.randint(len(randitems) + randskip, (1,), device="cpu").item()
+        if ridx >= len(randitems):
+            return x
+        return enhance_tensor(x, randitems[ridx], scale=scale)
+    fpreset = FILTER_PRESETS.get(name)
+    if fpreset is not None:
+        return ffilter(x, 1, 1.0, fpreset, 0.5 * scale)
+    match name:
+        case "korniabilateralblur":
+            return x + (kf.bilateral_blur(x, (3, 3), 0.1, (1.5, 1.5)) - x) * (
+                scale * 2.0
+            )
+        case "korniagaussianblur":
+            return kf.gaussian_blur2d(x, (3, 3), (1.5, 1.5)) * scale
+        case "korniasharpen":
+            return x + (kf.unsharp_mask(x, (3, 3), (1.5, 1.5)) - x) * (scale / 2.0)
+        case "korniaedge" | "korniarevedge":
+            blur = kf.bilateral_blur(x, (3, 3), 0.1, (1.5, 1.5)) - x
+            sharpened = kf.unsharp_mask(x, (3, 3), (1.5, 1.5)) - x
+            if name == "korniarevedge":
+                scale *= -1.0
+            return x + (sharpened + blur) * (scale / 2.0)
+        case "korniarandblursharp":
+            return enhance_tensor(
+                x,
+                "korniagaussianblur"
+                if torch.rand(1, device="cpu").item() < 0.5
+                else "korniasharpen",
+                scale=scale,
+            )
+        case _:
+            raise ValueError("Unknown enhancement")
+
+
+@torch.no_grad()
 def scale_samples(
     samples,
     width,
@@ -224,8 +337,27 @@ def scale_samples(
     mode="bicubic",
     mode_h=None,
     antialias_size=0,
+    post_effect_strength=1.0,
+    sigma=None,
 ):
     if mode_h is None:
+        mode_h = mode
+    mode, *enhancement = mode.split("+", 1)
+    mode_h = mode_h.split("+", 1)[0]
+    modes = (mode, mode_h)
+    if "randomaa" in modes:
+        raasize, useraa = torch.rand(2, device="cpu").detach()
+        antialias_size = (int(raasize * 7) + 1) * int(useraa * 2)
+    if "random" in modes or "randomaa" in modes:
+        ridxs = torch.randint(
+            len(RAND_UPSCALE_METHODS),
+            (2,),
+            dtype=torch.uint8,
+        ).tolist()
+        mode, mode_h = (
+            m if mode not in ("random", "randomaa") else RAND_UPSCALE_METHODS[ridx]
+            for ridx, m in zip(ridxs, (mode, mode_h))
+        )
         mode_h = mode
     if mode in ("bicubic", "nearest-exact", "bilinear", "area"):
         result = torch.nn.functional.interpolate(
@@ -236,6 +368,13 @@ def scale_samples(
         )
     else:
         result = biderp(samples, width, height, mode, mode_h)
+    if enhancement:
+        result = enhance_tensor(
+            result,
+            enhancement[-1],
+            scale=post_effect_strength,
+            sigma=sigma,
+        )
     if antialias_size < 1 or antialias_size > 7:
         return result
     return antialias_tensor(result, antialias_size)
@@ -246,18 +385,10 @@ def biderp(samples, width, height, mode="bislerp", mode_h=None):
     if mode_h is None:
         mode_h = mode
 
-    modes = {
-        "colorize": BLENDING_MODES["colorize"],
-        "hslerp": hslerp_alt,
-        "bislerp": slerp_orig,
-        "bibislerp": BLENDING_MODES["bislerp"],
-        "inject": BLENDING_MODES["inject"],
-        "lerp": BLENDING_MODES["lerp"],
-        "lineardodge": BLENDING_MODES["lineardodge"],
-        "cosinterp": BLENDING_MODES["cosinterp"],
-        "cuberp": BLENDING_MODES["cuberp"],
-    }
-    derp_w, derp_h = modes.get(mode, slerp_orig), modes.get(mode_h, slerp_orig)
+    derp_w, derp_h = (
+        BIDERP_MODES.get(mode, slerp_orig),
+        BIDERP_MODES.get(mode_h, slerp_orig),
+    )
 
     def generate_bilinear_data(length_old, length_new, device):
         coords_1 = torch.arange(length_old, dtype=torch.float32, device=device).reshape(

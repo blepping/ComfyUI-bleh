@@ -2,6 +2,11 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20240506
+
+* Add many new scaling types.
+* Add enhancements that can be combined with scaling, also `apply_enhancement` blockops function.
+
 ## 20240423
 
 * Added `BlehPlug` and `BlehDisableNoise` (see README for usage and description).

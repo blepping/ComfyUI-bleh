@@ -122,6 +122,9 @@ class OpType(Enum):
     # count, [ops]
     REPEAT = auto()
 
+    #
+    APPLY_ENHANCEMENT = auto()
+
 
 OP_DEFAULTS = {
     OpType.SLICE: OrderedDict(
@@ -189,6 +192,7 @@ OP_DEFAULTS = {
     ),
     OpType.CROP: OrderedDict(top=0, bottom=0, left=0, right=0),
     OpType.REPEAT: OrderedDict(count=2, ops=()),
+    OpType.APPLY_ENHANCEMENT: OrderedDict(scale=1.0, type="korniabilateralblur"),
 }
 
 
@@ -410,6 +414,7 @@ class OpScaleTorch(Operation):
             height,
             mode,
             antialias_size=8 if antialias else 0,
+            sigma=state.get("sigma"),
         )
 
 
@@ -655,6 +660,12 @@ class OpRepeat(SubOpsOperation):
             for subop in subops:
                 subop.eval(state)
         return state[state["target"]]
+
+
+class OpApplyEnhancement(Operation):
+    def op(self, t, _state):
+        scale, typ = self.args
+        return enhance_tensor(t, typ, scale=scale, sigma=state.get("sigma"))
 
 
 OP_TO_OPCLASS = {

@@ -367,6 +367,12 @@ These two shortcuts can be combined. A mask of `[["rep", 2, 1, [3, 0], 2]]` expa
 ]
 ```
 
+**`apply_enhancement`**: Applies an [enhancement](#enhancement-types) to the target.
+
+1. `scale`: 1.0
+2. `type`: korniabilateralblur
+
+
 #### Blend Modes
 
 1. bislerp: Interpolates between tensors a and b using normalized linear interpolation.
@@ -400,18 +406,7 @@ Custom filters may also be defined. For example, `gaussianblur` in the YAML filt
 
 #### Scaling Functions
 
-1. bicubic: Generally the best option.
-2. bilinear
-3. nearest-exact
-4. area
-5. bislerp: Interpolates between tensors a and b using normalized linear interpolation.
-6. colorize: Supposedly transfers color. May or may not work that way.
-7. hslerp: Hybrid Spherical Linear Interporation, supposedly smooths transitions between orientations and colors.
-8. bibislerp: Uses bislerp as the slerp function in bislerp. When slerping once just isn't enough.
-9. cosinterp: Cosine interpolation.
-10. cuberp: Cubic interpolation.
-11. inject: Adds the value scaled by the ratio. Probably not the best for scaling.
-12. lineardodge: Supposedly simulates a brightning effect.
+See [Scaling Types](#scaling-types) below.
 
 #### Examples
 
@@ -453,8 +448,61 @@ Custom filters may also be defined. For example, `gaussianblur` in the YAML filt
 
 ### BlehLatentOps
 
-Basically the same as BlehBlockOps, except the condition `type` will be `latent`. Obviously stuff involving steps, percentages, etc does not apply.
+Basically the same as BlehBlockOps, except the condition `type` will be `latent`. Obviously stuff involving steps, percentages, etc do not apply.
 This node allows you to apply the blending/filtering/scaling operations to a latent.
+
+### BlehLatentScaleBy
+
+Like the builtin `LatentScaleBy` node, however it allows setting the horizontal and vertical scaling types and scales independently
+as well as allowing providing an extended list of scaling options. Can also be useful for testing what different types of scaling or
+enhancement effects look like.
+
+## Scaling Types
+
+* bicubic: Generally the safe option.
+* bilinear: Like bicubic but slightly not as good?
+* nearest-exact
+* area
+* bislerp: Interpolates between tensors a and b using normalized linear interpolation.
+* colorize: Supposedly transfers color. May or may not work that way.
+* hslerp: Hybrid Spherical Linear Interporation, supposedly smooths transitions between orientations and colors.
+* bibislerp: Uses bislerp as the slerp function in bislerp. When slerping once just isn't enough.
+* cosinterp: Cosine interpolation.
+* cuberp: Cubic interpolation.
+* inject: Adds the value scaled by the ratio. Probably not the best for scaling.
+* lineardodge: Supposedly simulates a brightning effect.
+* random: Chooses a random relatively normal scaling function each time. My thought is this will avoid artifacts from
+  a specific scaling type from getting reinforced each step. Generally only useful for Deep Shrink or
+  [jankhdiffusion](https://github.com/blepping/comfyui_jankhidiffusion).
+* randomaa: Like `random`, however it will also choose a random antialias size.
+
+Scaling types like `bicubic+something` will apply the `something` enhancement after scaling. See below.
+
+Scaling types that start with `rev` like `revinject` reverse the arguments to the scaling function.
+For example, `inject` does `a + b * scale`, `revinject` does `b + a * scale`. When is this desirable?
+I really don't know! Just stuff to experiment with. It may or may not be useful. (`revcosinterp` looks better than `cosinterp` though.)
+
+**Note**: Scaling types like `random` are very experimental and may be modified or removed.
+
+## Enhancement Types
+
+* randmultihighlowpass: Randomly uses multihighpass or multilowpass filter. Effect is generally quite strong.
+* randhilowpass: Randomly uses a highpass or lowpass filter. When you filter both high and low frequencies you are left with...
+  nothing! The effect is very strong. May not be useful.
+* randlowbandpass: Randomly uses a bandpass or lowpass filter.
+* randhibandpass: Randomly uses a bandpass or highpass filter.
+* renoise1: Adds some gaussian noise. Starts off relatively weak and increases based on sigma.
+* renoise2: Adds some guassian noise. Starts relatively strong and decreases based on sigma.
+* korniabilateralblur: Applies a bilateral (edge preserving) blur effect.
+* korniagaussianblur: Applies a guassian blur effect.
+* korniasharpen: Applies a sharpen effect.
+* korniaedge: Applies an edge enhancement effect.
+* korniarevedge: Applies an edge softening effect - may not work correctly.
+* korniarandblursharp: Randomly chooses between blurring and sharpening.
+
+Also may be an item from [Filters](#filters).
+
+**Note**: These enhancements are very experimental and may be modified or removed.
 
 ## Credits
 
