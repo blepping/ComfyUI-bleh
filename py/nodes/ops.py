@@ -663,7 +663,7 @@ class OpRepeat(SubOpsOperation):
 
 
 class OpApplyEnhancement(Operation):
-    def op(self, t, _state):
+    def op(self, t, state):
         scale, typ = self.args
         return enhance_tensor(t, typ, scale=scale, sigma=state.get("sigma"))
 
@@ -689,6 +689,7 @@ OP_TO_OPCLASS = {
     OpType.PAD: OpPad,
     OpType.CROP: OpCrop,
     OpType.REPEAT: OpRepeat,
+    OpType.APPLY_ENHANCEMENT: OpApplyEnhancement,
 }
 
 
