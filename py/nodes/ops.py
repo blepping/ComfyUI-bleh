@@ -508,7 +508,7 @@ class OpTargetSkip(Operation):
 
 class OpMultiply(Operation):
     def op(self, t, _state):
-        return t.mul_(selg.args[0])
+        return t.mul_(self.args[0])
 
 
 class OpBlendOp(SubOpsOperation):
