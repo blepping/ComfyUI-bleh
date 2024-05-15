@@ -1,6 +1,6 @@
 from .py import settings
 
-BLEH_VERSION = 0
+BLEH_VERSION = 1
 
 settings.load_settings()
 

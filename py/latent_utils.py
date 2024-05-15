@@ -193,6 +193,26 @@ BIDERP_MODES |= {
     "revbibislerp": BLENDING_MODES["revbislerp"],
 }
 
+ENHANCE_METHODS = (
+    "lowpass",
+    "highpass",
+    "bandpass",
+    "randhilowpass",
+    "randmultihilowpass",
+    "randhibandpass",
+    "randlowbandpass",
+    "gaussianblur",
+    "edge",
+    "sharpen",
+    "korniabilateralblur",
+    "korniagaussianblur",
+    "korniasharpen",
+    "korniaedge",
+    "korniarevedge",
+    "korniarandblursharp",
+    "renoise1",
+    "renoise2",
+)
 
 UPSCALE_METHODS = (
     "bicubic",
@@ -203,26 +223,7 @@ UPSCALE_METHODS = (
     *(
         f"{meth}+{enh}"
         for meth in ("bicubic", "bislerp", "hslerp", "random")
-        for enh in (
-            "lowpass",
-            "highpass",
-            "bandpass",
-            "randhilowpass",
-            "randmultihilowpass",
-            "randhibandpass",
-            "randlowbandpass",
-            "gaussianblur",
-            "edge",
-            "sharpen",
-            "korniabilateralblur",
-            "korniagaussianblur",
-            "korniasharpen",
-            "korniaedge",
-            "korniarevedge",
-            "korniarandblursharp",
-            "renoise1",
-            "renoise2",
-        )
+        for enh in ENHANCE_METHODS
     ),
     "random",
     "randomaa",
@@ -261,8 +262,18 @@ def antialias_tensor(x, antialias_size):
     return torch.nn.functional.conv2d(x, filt, groups=channels, padding="same")
 
 
-def enhance_tensor(x, name, scale=1.0, sigma=None):  # noqa: PLR0911
+def enhance_tensor(
+    x,
+    name,
+    scale=1.0,
+    sigma=None,
+    *,
+    skip_multiplier=1,
+    adjust_scale=True,
+):
     randitems = None
+    orig_scale = scale
+    randskip = 0
     match name:
         case "randmultihilowpass":
             scale *= 0.1
@@ -294,6 +305,9 @@ def enhance_tensor(x, name, scale=1.0, sigma=None):  # noqa: PLR0911
                 return x
             noise = torch.randn_like(x)
             return noise.mul_(noise_scale).add_(x)
+    if not adjust_scale:
+        scale = orig_scale
+    randskip = int(randskip * skip_multiplier)
     if randitems:
         ridx = torch.randint(len(randitems) + randskip, (1,), device="cpu").item()
         if ridx >= len(randitems):
@@ -301,6 +315,8 @@ def enhance_tensor(x, name, scale=1.0, sigma=None):  # noqa: PLR0911
         return enhance_tensor(x, randitems[ridx], scale=scale)
     fpreset = FILTER_PRESETS.get(name)
     if fpreset is not None:
+        if not adjust_scale:
+            scale *= 2
         return ffilter(x, 1, 1.0, fpreset, 0.5 * scale)
     match name:
         case "korniabilateralblur":
