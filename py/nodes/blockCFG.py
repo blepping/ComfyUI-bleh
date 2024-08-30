@@ -143,10 +143,13 @@ class BlockCFGBleh:
                 for offs in (primary_offset, secondary_offset)
             )
             # print(f"\nIDXS: cond={primary_idxs}, uncond={secondary_idxs}")
-            result[primary_idxs, ...] = (
-                tensor[primary_idxs, ...]
-                + (tensor[primary_idxs, ...] - tensor[secondary_idxs, ...]) * scale
-            )
+            result[primary_idxs, ...] -= (
+                tensor[primary_idxs, ...] - tensor[secondary_idxs, ...]
+            ).mul_(scale)
+            # result[primary_idxs, ...] = (
+            #     tensor[primary_idxs, ...]
+            #     + (tensor[primary_idxs, ...] - tensor[secondary_idxs, ...]) * scale
+            # )
             return result
 
         def non_output_block_patch(h, transformer_options, *, block_list):
