@@ -16,8 +16,10 @@ class DiscardPenultimateSigma:
     FUNCTION = "go"
     RETURN_TYPES = ("SIGMAS",)
     CATEGORY = "sampling/custom_sampling/sigmas"
+    DESCRIPTION = "Discards the next to last sigma in the list."
 
-    def go(self, enabled, sigmas):
+    @classmethod
+    def go(cls, enabled, sigmas):
         if not enabled or len(sigmas) < 2:
             return (sigmas,)
         return (torch.cat((sigmas[:-2], sigmas[-1:])),)
@@ -40,6 +42,11 @@ class SeededDisableNoise:
 
 
 class BlehDisableNoise:
+    DESCRIPTION = "Allows setting a seed even when disabling noise. Used for SamplerCustomAdvanced or other nodes that take a NOISE input."
+    RETURN_TYPES = ("NOISE",)
+    FUNCTION = "go"
+    CATEGORY = "sampling/custom_sampling/noise"
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -51,12 +58,9 @@ class BlehDisableNoise:
             },
         }
 
-    def go(self, noise_seed):
+    @classmethod
+    def go(cls, noise_seed):
         return (SeededDisableNoise(noise_seed),)
-
-    RETURN_TYPES = ("NOISE",)
-    FUNCTION = "go"
-    CATEGORY = "sampling/custom_sampling/noise"
 
 
 class Wildcard(str):
@@ -67,16 +71,18 @@ class Wildcard(str):
 
 
 class BlehPlug:
+    DESCRIPTION = "This node can be used to plug up an input but act like the input was not actually connected. Can be used to prevent something like Use Everywhere nodes from supplying an input without having to set up blacklists or other configuration."
+    FUNCTION = "go"
+    OUTPUT_NODE = False
+    CATEGORY = "hacks"
+
     WILDCARD = Wildcard("*")
+    RETURN_TYPES = (WILDCARD,)
 
     @classmethod
     def INPUT_TYPES(cls):
         return {}
 
-    def go(self):
+    @classmethod
+    def go(cls):
         return (None,)
-
-    RETURN_TYPES = (WILDCARD,)
-    FUNCTION = "go"
-    OUTPUT_NODE = False
-    CATEGORY = "hacks"

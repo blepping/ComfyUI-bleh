@@ -13,6 +13,7 @@ A ComfyUI nodes collection... eventually.
 7. Ensure a seed is set even when `add_noise` is turned off in a sampler. Yes, that's right: if you don't have `add_noise` enabled _no_ seed gets set for samplers like `euler_a` and it's not possible to reproduce generations. (look for the [BlehForceSeedSampler](#blehforceseedsampler) node). For `SamplerCustomAdvanced` you can use `BlehDisableNoise` to accomplish the same thing.
 8. Allows swapping to a refiner model at a predefined time (look for the [BlehRefinerAfter](#blehrefinerafter) node).
 9. Allow defining arbitrary model patches (look for the [BlehBlockOps](#blehblockops) node).
+10. Experimental blockwise CFG type effect (look for the [BlehBlockCFG](#blehblockcfg) node).
 
 ## Configuration
 
@@ -32,12 +33,14 @@ Current defaults:
 |-|-|-|
 |`enabled`|`true`|Toggles whether enhanced TAESD previews are enabled|
 |`max_size`|`768`|Max width or height for previews. Note this does not affect TAESD decoding, just the preview image|
+|`max_width`|`max_size`|Same as `max_size` except allows setting the width independently. Previews may not work well with non-square max dimensions.|
+|`max_height`|`max_size`|Same as `max_size` except allows setting the height independently. Previews may not work well with non-square max dimensions.|
 |`max_batch`|`4`|Max number of latents in a batch to preview|
 |`max_batch_cols`|`2`|Max number of columns to use when previewing batches|
 |`throttle_secs`|`2`|Max frequency to decode the latents for previewing. `0.25` would be every quarter second, `2` would be once every two seconds|
 |`maxed_batch_step_mode`|`false`|When `false`, you will see the first `max_batch` previews, when `true` you will see previews spread across the batch|
-|`preview_device`|`null`|`null` (use the default device) or a string with a PyTorch device name like `"cpu"`, `"cuda:0"`, etc. Can be used to run TAESD previews on CPU or other available devices.|
-|`skip_upscale_layers`|`0`|The TAESD model has three upscale layers, each doubles the size of the result. Skipping some of them will significantly speed up TAESD previews at the cost of smaller preview image results.|
+|`preview_device`|`null`|`null` (use the default device) or a string with a PyTorch device name like `"cpu"`, `"cuda:0"`, etc. Can be used to run TAESD previews on CPU or other available devices. Not recommended to change this unless you really need to, using the CPU device may prevent out of memory errors but will likely significantly slow down generation.|
+|`skip_upscale_layers`|`0`|The TAESD model has three upscale layers, each doubles the size of the result. Skipping some of them will significantly speed up TAESD previews at the cost of smaller preview image results. You can set this to `-1` to automatically pop layers until at least one dimension is within the max width/height or `-2` to aggressively pop until _both_ dimensions are within the limit.|
 
 These defaults are conservative. I would recommend setting `throttle_secs` to something relatively high (like 5-10) especially if you are generating batches at high resolution.
 
@@ -124,6 +127,20 @@ Allows switching to a refiner model at a predefined time. There are three time m
 **Note**: This only patches the unet apply function, most other stuff including conditioning comes from the base model so
 you likely can only use this to swap between models that are closely related. For example, switching from SD 1.5 to
 SDXL is not going to work at all.
+
+### BlehBlockCFG
+
+Experimental model patch that attempts to guide either `cond` (positive prompt) or `uncond` (negative prompt) away from its opposite.
+In other words, when applied to `cond` it will try to push it further away from what `uncond` is doing and vice versa. Stronger effect when
+applied to `cond` or output blocks. The defaults are reasonable for SD 1.5 (or as reasonable as weird stuff like this can be).
+
+Enter comma separated blocks numbers starting with one of **I**input, **O**utput or **M**iddle like `i4,m0,o4`.
+
+The patch can be applied to the same model multiple times.
+
+Is it good, or even doing what I think? Who knows!
+
+_Note_: Probably only works with SD 1.x and SDXL.
 
 ### BlehBlockOps
 

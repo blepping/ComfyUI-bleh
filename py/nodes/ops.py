@@ -6,6 +6,7 @@ import importlib
 import operator as pyop
 from collections import OrderedDict
 from enum import Enum, auto
+from itertools import starmap
 
 import torch
 import yaml
@@ -122,7 +123,7 @@ class OpType(Enum):
     # count, [ops]
     REPEAT = auto()
 
-    #
+    # scale, type
     APPLY_ENHANCEMENT = auto()
 
 
@@ -207,7 +208,7 @@ class Compare:
 
     def __init__(self, typ: str, value):
         self.typ = getattr(CompareType, typ.upper().strip())
-        if self.typ in (CompareType.OR, CompareType.AND, CompareType.NOT):
+        if self.typ in {CompareType.OR, CompareType.AND, CompareType.NOT}:
             self.value = tuple(ConditionGroup(v) for v in value)
             self.field = None
             return
@@ -282,7 +283,7 @@ class ConditionGroup:
             conds = tuple(conds.items())
         if isinstance(conds[0], str):
             conds = (conds,)
-        self.conds = tuple(Condition(ct, cv) for ct, cv in conds)
+        self.conds = tuple(starmap(Condition, conds))
 
     def test(self, state: dict) -> bool:
         return all(c.test(state) for c in self.conds)
@@ -319,7 +320,7 @@ class Operation:
             if extra:
                 errstr = f"Unexpected argument keys for operation {typ}: {extra}"
                 raise ValueError(errstr)
-            self.args = tuple(args.get(k, v) for k, v in defaults.items())
+            self.args = tuple(starmap(args.get, defaults.items()))
         else:
             if len(args) > len(defaults):
                 raise ValueError("Too many arguments for operation")
@@ -458,7 +459,7 @@ class OpFlip(Operation):
     def op(self, t, _state):
         return torch.flip(
             t,
-            dims=(2 if self.args[0] in ("v", "vertical") else 3,),
+            dims=(2 if self.args[0] in {"v", "vertical"} else 3,),
         )
 
 
@@ -605,7 +606,8 @@ class OpNoise(Operation):
 
 
 class OpDebug(Operation):
-    def op(self, t, state):
+    @classmethod
+    def op(cls, t, state):
         stcopy = {
             k: v
             if not isinstance(v, torch.Tensor)
@@ -779,11 +781,12 @@ class BlehBlockOps:
             },
         }
 
+    @classmethod
     def patch(
-        self,
+        cls,
         model,
         rules: str,
-        sigmas_opt=None,
+        sigmas_opt: None | torch.Tensor = None,
     ):
         rules = rules.strip()
         if len(rules) == 0:
@@ -919,7 +922,7 @@ class BlehBlockOps:
             }
             set_state_step(state, args["timestep"].max().item())
             x = pre_model(state)
-            args = args | {"input": x}
+            args = args | {"input": x}  # noqa: PLR6104
             if orig_model_function_wrapper is not None:
                 result = orig_model_function_wrapper(apply_model, args)
             else:
@@ -956,9 +959,11 @@ class BlehLatentScaleBy:
 
     CATEGORY = "latent"
 
+    @classmethod
     def upscale(
-        self,
-        samples,
+        cls,
+        *,
+        samples: dict,
         method_horizontal: str,
         method_vertical: str,
         scale_width: float,
@@ -997,8 +1002,9 @@ class BlehLatentOps:
 
     CATEGORY = "latent"
 
+    @classmethod
     def go(
-        self,
+        cls,
         samples,
         rules: str,
     ):
