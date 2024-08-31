@@ -11,7 +11,7 @@ from einops import rearrange
 
 
 class HyperTile:
-    def __init__(
+    def __init__(  # noqa: PLR0917
         self,
         model,
         seed,
@@ -144,6 +144,11 @@ class HyperTile:
 
 
 class HyperTileBleh:
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+    CATEGORY = "bleh/model_patches"
+    DESCRIPTION = "Model patch that speeds up generation at some cost of quality."
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -177,12 +182,10 @@ class HyperTileBleh:
             },
         }
 
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "patch"
-    CATEGORY = "bleh/model_patches"
-
+    @classmethod
     def patch(
-        self,
+        cls,
+        *,
         model,
         seed,
         tile_size,

@@ -11,7 +11,9 @@ class Settings:
             self.btp_enabled = False
         else:
             self.btp_enabled = True
-            self.btp_max_size = max(8, btp.get("max_size", 768))
+            max_size = max(8, btp.get("max_size", 768))
+            self.btp_max_width = max(8, btp.get("max_width", max_size))
+            self.btp_max_height = max(8, btp.get("max_height", max_size))
             self.btp_max_batch = max(1, btp.get("max_batch", 4))
             self.btp_max_batch_cols = max(1, btp.get("max_batch_cols", 2))
             self.btp_throttle_secs = btp.get("throttle_secs", 1)
@@ -19,12 +21,13 @@ class Settings:
             self.btp_preview_device = btp.get("preview_device")
             self.btp_maxed_batch_step_mode = btp.get("maxed_batch_step_mode", False)
 
-    def get_cfg_path(self, filename):
+    @staticmethod
+    def get_cfg_path(filename) -> Path:
         my_path = Path.resolve(Path(__file__).parent)
         return my_path.parent / filename
 
     def try_update_from_json(self, filename):
-        import json
+        import json  # noqa: PLC0415
 
         try:
             with Path.open(self.get_cfg_path(filename)) as fp:
@@ -35,7 +38,7 @@ class Settings:
 
     def try_update_from_yaml(self, filename):
         try:
-            import yaml
+            import yaml  # noqa: PLC0415
 
             with Path.open(self.get_cfg_path(filename)) as fp:
                 self.update(yaml.safe_load(fp))

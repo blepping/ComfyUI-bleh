@@ -1,15 +1,20 @@
 # Credits:
-# Blending, slice and filtering functions based on https://github.com/WASasquatch/FreeU_Advanced
+#   Blending, slice and filtering functions based on https://github.com/WASasquatch/FreeU_Advanced
+from __future__ import annotations
 
 import math
+import os
 
 import kornia.filters as kf
 import numpy as np
 import torch
-from torch import fft
+from torch import FloatTensor, LongTensor, fft
+
+OVERRIDE_NO_SCALE = "COMFYUI_BLEH_OVERRIDE_NO_SCALE" in os.environ
+USE_ORIG_NORMALIZE = "COMFYUI_BLEH_ORIG_NORMALIZE" in os.environ
 
 
-def normalize(latent, target_min=None, target_max=None):
+def normalize_orig(latent, target_min=None, target_max=None, **_unused_kwargs: dict):
     min_val = latent.min()
     max_val = latent.max()
 
@@ -20,6 +25,26 @@ def normalize(latent, target_min=None, target_max=None):
 
     normalized = (latent - min_val) / (max_val - min_val)
     return normalized * (target_max - target_min) + target_min
+
+
+def normalize(latent, *, reference_latent=None, dim=(-3, -2, -1)):
+    if reference_latent is None:
+        return latent
+    min_val, max_val = (
+        latent.amin(dim=dim, keepdim=True),
+        latent.amax(dim=dim, keepdim=True),
+    )
+    target_min, target_max = (
+        reference_latent.amin(dim=dim, keepdim=True),
+        reference_latent.amax(dim=dim, keepdim=True),
+    )
+
+    normalized = (latent - min_val) / (max_val - min_val)
+    return normalized * (target_max - target_min) + target_min
+
+
+if USE_ORIG_NORMALIZE:
+    normalize = normalize_orig
 
 
 def hslerp(a, b, t):
@@ -36,15 +61,10 @@ def hslerp(a, b, t):
         device=a.device,
         dtype=a.dtype,
     )
-    interpolation_tensor[0, 0, 0, 0] = 1.0
+    interpolation_tensor[0, 0, 0, 0] = 1.0 if t < 0.5 else -1.0
 
     result = (1 - t) * a + t * b
-
-    norm = (torch.norm(b - a, dim=1, keepdim=True) / 6) * interpolation_tensor
-    if t < 0.5:
-        result += norm
-    else:
-        result -= norm
+    result += (torch.norm(b - a, dim=1, keepdim=True) / 6) * interpolation_tensor
 
     return result
 
@@ -64,6 +84,18 @@ def hslerp_alt(a, b, t):
     norm = (torch.norm(b - a, dim=1, keepdim=True) / 6) * interp
     norm[t.broadcast_to(norm.shape) < 0.5] *= -1
     return result.add_(norm)
+
+
+# This should be more correct but the results are worse. :(
+def hslerp_alt_(a, b, t):
+    if a.shape != b.shape:
+        raise ValueError("Input tensors a and b must have the same shape.")
+    t_expanded = t.broadcast_to(a.shape[-2:])
+    while t_expanded.ndim < a.ndim:
+        t_expanded = t_expanded.unsqueeze(0)
+    interp = torch.where(t_expanded < 0.5, 1.0, -1.0)
+    result = (1 - t) * a + t * b
+    return result.add_((torch.norm(b - a, dim=1, keepdim=True) / 6) * interp)
 
 
 # Copied from ComfyUI
@@ -101,36 +133,233 @@ def slerp_orig(b1, b2, r):
     return res
 
 
+# From https://gist.github.com/Birch-san/230ac46f99ec411ed5907b0a3d728efa
+def altslerp(  # noqa: PLR0914
+    v0: FloatTensor,
+    v1: FloatTensor,
+    t: float | FloatTensor,
+    dot_threshold=0.9995,
+    dim=-1,
+):
+    # Normalize the vectors to get the directions and angles
+    v0_norm: FloatTensor = torch.linalg.norm(v0, dim=dim)
+    v1_norm: FloatTensor = torch.linalg.norm(v1, dim=dim)
+
+    v0_normed: FloatTensor = v0 / v0_norm.unsqueeze(dim)
+    v1_normed: FloatTensor = v1 / v1_norm.unsqueeze(dim)
+
+    # Dot product with the normalized vectors
+    dot: FloatTensor = (v0_normed * v1_normed).sum(dim)
+    dot_mag: FloatTensor = dot.abs()
+
+    # if dp is NaN, it's because the v0 or v1 row was filled with 0s
+    # If absolute value of dot product is almost 1, vectors are ~colinear, so use lerp
+    gotta_lerp: LongTensor = dot_mag.isnan() | (dot_mag > dot_threshold)
+    can_slerp: LongTensor = ~gotta_lerp
+
+    t_batch_dim_count: int = (
+        max(0, t.dim() - v0.dim()) if isinstance(t, torch.Tensor) else 0
+    )
+    t_batch_dims: torch.Size = (
+        t.shape[:t_batch_dim_count] if isinstance(t, torch.Tensor) else torch.Size([])
+    )
+    out: FloatTensor = torch.zeros_like(v0.expand(*t_batch_dims, *(dim,) * v0.dim()))
+
+    # if no elements are lerpable, our vectors become 0-dimensional, preventing broadcasting
+    if gotta_lerp.any():
+        lerped: FloatTensor = torch.lerp(v0, v1, t)
+
+        out: FloatTensor = lerped.where(gotta_lerp.unsqueeze(dim), out)
+
+    # if no elements are slerpable, our vectors become 0-dimensional, preventing broadcasting
+    if can_slerp.any():
+        # Calculate initial angle between v0 and v1
+        theta_0: FloatTensor = dot.arccos().unsqueeze(dim)
+        sin_theta_0: FloatTensor = theta_0.sin()
+        # Angle at timestep t
+        theta_t: FloatTensor = theta_0 * t
+        sin_theta_t: FloatTensor = theta_t.sin()
+        # Finish the slerp algorithm
+        s0: FloatTensor = (theta_0 - theta_t).sin() / sin_theta_0
+        s1: FloatTensor = sin_theta_t / sin_theta_0
+        slerped: FloatTensor = s0 * v0 + s1 * v1
+
+        out: FloatTensor = slerped.where(can_slerp.unsqueeze(dim), out)
+
+    return out
+
+
+class BlendMode:
+    __slots__ = ("allow_scale", "f", "norm", "norm_dims", "rev")
+
+    class _Empty:
+        pass
+
+    def __init__(
+        self,
+        f,
+        norm=None,
+        norm_dims=(-3, -2, -1),
+        rev=False,
+        allow_scale=True,
+    ):
+        self.f = f
+        self.norm = norm
+        self.norm_dims = norm_dims
+        self.rev = rev
+        self.allow_scale = allow_scale
+
+    def edited(
+        self,
+        *,
+        f=_Empty,
+        norm=_Empty,
+        norm_dims=_Empty,
+        rev=_Empty,
+        allow_scale=_Empty,
+    ):
+        empty = self._Empty
+        return self.__class__(
+            f if f is not empty else self.f,
+            norm=norm if norm is not empty else self.norm,
+            norm_dims=norm_dims if norm_dims is not empty else self.norm_dims,
+            rev=rev if rev is not empty else self.rev,
+            allow_scale=allow_scale if allow_scale is not empty else self.allow_scale,
+        )
+
+    def __call__(self, a, b, t):
+        if self.rev:
+            a, b = b, a
+        if self.norm is None:
+            return self.f(a, b, t)
+        ref = (1 - t) * a + t * b
+        return self.norm(self.f(a, b, t), reference_latent=ref, dim=self.norm_dims)
+
+
 BLENDING_MODES = {
     # Args:
     #   - a (tensor): Latent input 1
     #   - b (tensor): Latent input 2
     #   - t (float): Blending factor
     # Interpolates between tensors a and b using normalized linear interpolation.
-    "bislerp": lambda a, b, t: normalize((1 - t) * a + t * b),
+    "bislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b),
+    # "nbislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b, normalize),
+    "slerp": BlendMode(lambda a, b, t: altslerp(a, b, t, dim=0)),
     # Transfer the color from `b` to `a` by t` factor
-    "colorize": lambda a, b, t: a + (b - a) * t,
+    "colorize": BlendMode(lambda a, b, t: a + (b - a) * t),
     # Interpolates between tensors a and b using cosine interpolation.
-    "cosinterp": lambda a, b, t: (
-        a + b - (a - b) * torch.cos(t * torch.tensor(math.pi))
-    )
-    / 2,
+    "cosinterp": BlendMode(
+        lambda a, b, t: (a + b - (a - b) * torch.cos(t * torch.tensor(math.pi))) / 2,
+    ),
     # Interpolates between tensors a and b using cubic interpolation.
-    "cuberp": lambda a, b, t: a + (b - a) * (3 * t**2 - 2 * t**3),
+    "cuberp": BlendMode(lambda a, b, t: a + (b - a) * (3 * t**2 - 2 * t**3)),
     # Interpolates between tensors a and b using normalized linear interpolation,
     # with a twist when t is greater than or equal to 0.5.
-    "hslerp": hslerp,
+    "hslerp": BlendMode(hslerp),
     # Adds tensor b to tensor a, scaled by t.
-    "inject": lambda a, b, t: a + b * t,
+    "inject": BlendMode(lambda a, b, t: a + b * t),
     # Interpolates between tensors a and b using linear interpolation.
-    "lerp": lambda a, b, t: (1 - t) * a + t * b,
+    "lerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b),
     # Simulates a brightening effect by adding tensor b to tensor a, scaled by t.
-    "lineardodge": lambda a, b, t: normalize(a + b * t),
+    "lineardodge": BlendMode(lambda a, b, t: a + b * t),
+    # "nlineardodge": BlendMode(lambda a, b, t: a + b * t, normalize),
+    # Simulates a brightening effect by dividing a by (1 - b) with a small epsilon to avoid division by zero.
+    "colordodge": BlendMode(lambda a, b, _t: a / (1 - b + 1e-6), allow_scale=False),
+    "difference": BlendMode(
+        lambda a, b, t: abs(a - b) * t,
+        normalize,
+        allow_scale=False,
+    ),
+    "exclusion": BlendMode(
+        lambda a, b, t: (a + b - 2 * a * b) * t,
+        normalize,
+        allow_scale=False,
+    ),
+    "glow": BlendMode(
+        lambda a, b, _t: torch.where(
+            a <= 1,
+            a**2 / (1 - b + 1e-6),
+            b * (a - 1) / (a + 1e-6),
+        ),
+        allow_scale=False,
+    ),
+    "hardlight": BlendMode(
+        lambda a, b, t: (
+            2 * a * b * (a < 0.5).float()
+            + (1 - 2 * (1 - a) * (1 - b)) * (a >= 0.5).float()
+        )
+        * t,
+        allow_scale=False,
+    ),
+    "linearlight": BlendMode(
+        lambda a, b, _t: torch.where(b <= 0.5, a + 2 * b - 1, a + 2 * (b - 0.5)),
+    ),
+    "multiply": BlendMode(
+        lambda a, b, t: a * t * b * t,
+        normalize,
+        allow_scale=False,
+    ),
+    "overlay": BlendMode(
+        lambda a, b, t: (2 * a * b + a**2 - 2 * a * b * a) * t
+        if torch.all(b < 0.5)
+        else (1 - 2 * (1 - a) * (1 - b)) * t,
+        allow_scale=False,
+    ),
+    # Combines tensors a and b using the Pin Light formula.
+    "pinlight": BlendMode(
+        lambda a, b, _t: torch.where(
+            b <= 0.5,
+            torch.min(a, 2 * b),
+            torch.max(a, 2 * b - 1),
+        ),
+    ),
+    "reflect": BlendMode(
+        lambda a, b, _t: torch.where(
+            b <= 1,
+            b**2 / (1 - a + 1e-6),
+            a * (b - 1) / (b + 1e-6),
+        ),
+        allow_scale=False,
+    ),
+    "screen": BlendMode(
+        lambda a, b, t: 1 - (1 - a) * (1 - b) * (1 - t),
+        allow_scale=False,
+    ),
+    "subtract": BlendMode(lambda a, b, t: a * t - b * t, allow_scale=False),
+    "vividlight": BlendMode(
+        lambda a, b, _t: torch.where(
+            b <= 0.5,
+            a / (1 - 2 * b + 1e-6),
+            (a + 2 * b - 1) / (2 * (1 - b) + 1e-6),
+        ),
+        allow_scale=False,
+    ),
 }
-for k in tuple(BLENDING_MODES.keys()):
-    if k == "hslerp":
-        continue
-    BLENDING_MODES[f"rev{k}"] = lambda a, b, t, f=BLENDING_MODES[k]: f(b, a, t)
+
+BLENDING_MODES |= {
+    f"norm{k}": v.edited(norm=normalize)
+    for k, v in BLENDING_MODES.items()
+    if k != "hslerp" and v.norm is None
+}
+
+BLENDING_MODES |= {f"rev{k}": v.edited(rev=True) for k, v in BLENDING_MODES.items()}
+
+BIDERP_MODES = {
+    k: v.edited(norm_dims=0)
+    for k, v in BLENDING_MODES.items()
+    if (v.allow_scale or OVERRIDE_NO_SCALE) and not k.endswith("slerp")
+}
+
+BIDERP_MODES |= {
+    "hslerp": hslerp_alt,
+    "bislerp": slerp_orig,
+    "altbislerp": altslerp,
+    "revaltbislerp": lambda a, b, t: altslerp(b, a, t),
+    "bibislerp": BLENDING_MODES["bislerp"].edited(norm_dims=0),
+    "revhslerp": lambda a, b, t: hslerp_alt(b, a, t),
+    "revbislerp": lambda a, b, t: slerp_orig(b, a, t),
+    "revbibislerp": BLENDING_MODES["revbislerp"].edited(norm_dims=0),
+}
 
 FILTER_PRESETS = {
     "none": (),
@@ -183,27 +412,22 @@ FILTER_PRESETS = {
 }
 
 
-BIDERP_MODES = {k: v for k, v in BLENDING_MODES.items() if not k.endswith("slerp")}
-BIDERP_MODES |= {
-    "hslerp": hslerp_alt,
-    "bislerp": slerp_orig,
-    "bibislerp": BLENDING_MODES["bislerp"],
-    "revhslerp": lambda a, b, t, f=hslerp_alt: f(b, a, t),
-    "revbislerp": lambda a, b, t, f=slerp_orig: f(b, a, t),
-    "revbibislerp": BLENDING_MODES["revbislerp"],
-}
-
 ENHANCE_METHODS = (
     "lowpass",
+    "multilowpass",
     "highpass",
+    "multihighpass",
     "bandpass",
     "randhilowpass",
     "randmultihilowpass",
     "randhibandpass",
     "randlowbandpass",
     "gaussianblur",
+    "multigaussianblur",
     "edge",
+    "multiedge",
     "sharpen",
+    "multisharpen",
     "korniabilateralblur",
     "korniagaussianblur",
     "korniasharpen",
@@ -252,7 +476,7 @@ FILTER_SIZES = (
 def make_filter(channels, dtype, size=3):
     a = FILTER_SIZES[size - 1]
     filt = torch.tensor(a[:, None] * a[None, :], dtype=dtype)
-    filt = filt / torch.sum(filt)
+    filt /= torch.sum(filt)
     return filt[None, None, :, :].repeat((channels, 1, 1, 1))
 
 
@@ -262,7 +486,7 @@ def antialias_tensor(x, antialias_size):
     return torch.nn.functional.conv2d(x, filt, groups=channels, padding="same")
 
 
-def enhance_tensor(
+def enhance_tensor(  # noqa: PLR0911
     x,
     name,
     scale=1.0,
@@ -350,6 +574,7 @@ def scale_samples(
     samples,
     width,
     height,
+    *,
     mode="bicubic",
     mode_h=None,
     antialias_size=0,
@@ -371,11 +596,11 @@ def scale_samples(
             dtype=torch.uint8,
         ).tolist()
         mode, mode_h = (
-            m if mode not in ("random", "randomaa") else RAND_UPSCALE_METHODS[ridx]
+            m if mode not in {"random", "randomaa"} else RAND_UPSCALE_METHODS[ridx]
             for ridx, m in zip(ridxs, (mode, mode_h))
         )
         mode_h = mode
-    if mode in ("bicubic", "nearest-exact", "bilinear", "area"):
+    if mode in {"bicubic", "nearest-exact", "bilinear", "area"}:
         result = torch.nn.functional.interpolate(
             samples,
             size=(height, width),
@@ -397,7 +622,7 @@ def scale_samples(
 
 
 # Modified from ComfyUI
-def biderp(samples, width, height, mode="bislerp", mode_h=None):
+def biderp(samples, width, height, mode="bislerp", mode_h=None):  # noqa: PLR0914
     if mode_h is None:
         mode_h = mode
 
@@ -494,7 +719,7 @@ def ffilter(x, threshold, scale, scales=None, strength=1.0):
                 crow - scale_threshold : crow + scale_threshold,
                 ccol - scale_threshold : ccol + scale_threshold,
             ] = scaled_scale_value
-            mask = mask + (scale_mask - mask) * strength
+            mask += (scale_mask - mask) * strength
 
     x_freq *= mask
 

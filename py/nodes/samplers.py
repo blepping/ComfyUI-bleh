@@ -15,6 +15,10 @@ class SamplerChain(NamedTuple):
 
 
 class BlehInsaneChainSampler:
+    RETURN_TYPES = ("SAMPLER", "BLEH_SAMPLER_CHAIN")
+    CATEGORY = "sampling/custom_sampling/samplers"
+    FUNCTION = "build"
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -26,11 +30,6 @@ class BlehInsaneChainSampler:
                 "sampler_chain_opt": ("BLEH_SAMPLER_CHAIN",),
             },
         }
-
-    RETURN_TYPES = ("SAMPLER", "BLEH_SAMPLER_CHAIN")
-    CATEGORY = "sampling/custom_sampling/samplers"
-
-    FUNCTION = "build"
 
     def build(
         self,
@@ -98,14 +97,15 @@ class BlehInsaneChainSampler:
 
 
 class BlehForceSeedSampler:
+    DESCRIPTION = "ComfyUI has a bug where it will not set any seed if you have add_noise disabled in the sampler. This node is a workaround for that which ensures a seed alway gets set."
+    RETURN_TYPES = ("SAMPLER",)
+    CATEGORY = "sampling/custom_sampling/samplers"
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {"sampler": ("SAMPLER",)},
         }
-
-    RETURN_TYPES = ("SAMPLER",)
-    CATEGORY = "sampling/custom_sampling/samplers"
 
     FUNCTION = "go"
 

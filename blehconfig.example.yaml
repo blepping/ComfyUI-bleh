@@ -1,0 +1,33 @@
+# Copy this file to blehconfig.yaml
+betterTaesdPreviews:
+    # If disabled, will use the old ComfyUI previewer.
+    enabled: true
+
+    # Maximum preview size (applies to both height and width).
+    max_size: 768
+
+    # Maximum preview width. If set, will override max_size.
+    max_width: 768
+
+    # Maximum preview height. If set, will override max_size.
+    max_height: 768
+
+    # Maximum batch items to preview.
+    max_batch: 4
+
+    # Maximum columns to use when previewing batches.
+    max_batch_cols: 2
+
+    # Minimum time between updating previews. The default will update the preview at most once per second.
+    throttle_secs: 1
+
+    # When enabled and previewing batches, you will see previews spread across the batch. Otherwise it will be the first max_batch items.
+    maxed_batch_step_mode: false
+
+    # Allows overriding the preview device, for example you could set it to "cpu". Note: Generally should be left
+    # alone unless you know you need to change it. Previewing on CPU will likely be quite slow.
+    preview_device: null
+
+    # Allows skipping upscale layers in the TAESD model, may increase performance when previewing large images or batches.
+    # May be set to -1 (conservative) or -2 (aggressive) to automatically calculate how many to skip. See README.md for details.
+    skip_upscale_layers: 0

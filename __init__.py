@@ -37,4 +37,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BlehDeepShrink": "Kohya Deep Shrink (bleh)",
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "BLEH_VERSION"]
+__all__ = ("BLEH_VERSION", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS")
+
+from .py.nodes import blockCFG
+
+NODE_CLASS_MAPPINGS["BlehBlockCFG"] = blockCFG.BlockCFGBleh

@@ -80,12 +80,11 @@ class PatchTypeTransformerReplace(PatchTypeTransformer):
         to["patches_replace"] = patches
         patches[self.name] = val
 
-    @torch.no_grad()
     def __call__(self, key, model_options, *args: list[Any]):
         return self._call(key, self.get_patches(model_options), *args)
 
-    @torch.no_grad()
-    def _call(self, key, patches, *args: list[Any]):
+    @classmethod
+    def _call(cls, key, patches, *args: list[Any]):
         p = patches.get(key)
         if p:
             return p(*args)
@@ -101,8 +100,8 @@ class PatchTypeModel(PatchTypeTransformer):
 
 
 class PatchTypeModelWrapper(PatchTypeModel):
-    @torch.no_grad()
-    def _call(self, patches, apply_model, opts):
+    @classmethod
+    def _call(cls, patches, apply_model, opts):
         if not patches:
             return apply_model(opts["input"], opts["timestep"], **opts["c"])
         return patches[0](apply_model, opts)
@@ -115,17 +114,25 @@ class PatchTypeSamplerPostCfgFunction(PatchTypeModel):
     def set_patches(self, model_options, val):
         model_options[self.name] = val
 
-    @torch.no_grad()
-    def _call(self, patches, opts):
-        result = opts["denoised"]
+    _call_result_key = "denoised"
+
+    @classmethod
+    def _call(cls, patches, opts):
+        curr_opts = opts.copy()
+        key = cls._call_result_key
         for p in patches:
-            result = p(opts | {"denoised": result})
+            result = p(curr_opts)
+            curr_opts[key] = result
         return result
 
 
+class PatchTypeSamplerPreCfgFunction(PatchTypeSamplerPostCfgFunction):
+    _call_result_key = "conds_out"
+
+
 class PatchTypeSamplerCfgFunction(PatchTypeModel):
-    @torch.no_grad()
-    def _call(self, patches, opts):
+    @classmethod
+    def _call(cls, patches, opts):
         if not patches:
             cond_pred, uncond_pred = opts["cond_denoised"], opts["uncond_denoised"]
             return uncond_pred + (cond_pred - uncond_pred) * opts["cond_scale"]
@@ -150,6 +157,9 @@ PATCH_TYPES = {
     "sampler_post_cfg_function": PatchTypeSamplerPostCfgFunction(
         "sampler_post_cfg_function",
     ),
+    "sampler_pre_cfg_function": PatchTypeSamplerPostCfgFunction(
+        "sampler_pre_cfg_function",
+    ),
 }
 
 
@@ -168,7 +178,7 @@ class ModelConditionalState:
 
 
 class ModelPatchConditional:
-    def __init__(
+    def __init__(  # noqa: PLR0917
         self,
         model_default,
         model_matched,
@@ -265,28 +275,65 @@ class ModelPatchConditionalNode:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
     CATEGORY = "bleh/model_patches"
+    DESCRIPTION = "Experimental model patch that lets you control when other model patches are active."
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_default": ("MODEL",),
-                "model_matched": ("MODEL",),
+                "model_default": (
+                    "MODEL",
+                    {
+                        "tooltip": "Fallback model patches, used when start/end/interval do not match.",
+                    },
+                ),
+                "model_matched": (
+                    "MODEL",
+                    {"tooltip": "Model patches used when start/end/interval match."},
+                ),
                 "start_percent": (
                     "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001},
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.001,
+                        "tooltip": "Start time as sampling percentage (not percentage of steps). Percentages are inclusive.",
+                    },
                 ),
                 "end_percent": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001},
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.001,
+                        "tooltip": "End time as sampling percentage (not percentage of steps). Percentages are inclusive.",
+                    },
                 ),
-                "interval": ("INT", {"default": 1, "min": -999, "max": 999}),
-                "base_on_default": ("BOOLEAN", {"default": True}),
+                "interval": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": -999,
+                        "max": 999,
+                        "tooltip": "Step interval to use model_matched. If positive 3 would mean activate every third step, if negative -3 would mean skip every third step.",
+                    },
+                ),
+                "base_on_default": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "When true, the active set of patches will be applied to model_default, otherwise they will be applied to model_matched.",
+                    },
+                ),
             },
         }
 
+    @classmethod
     def patch(
-        self,
+        cls,
+        *,
         model_default,
         model_matched=None,
         start_percent: float = 0.0,
