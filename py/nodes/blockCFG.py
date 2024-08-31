@@ -175,9 +175,9 @@ class BlockCFGBleh:
         m = model.clone()
         if input_blocks:
             (
-                m.set_model_input_block_patch
+                m.set_model_input_block_patch_after_skip
                 if skip_mode
-                else m.set_model_input_block_patch_after_skip
+                else m.set_model_input_block_patch
             )(
                 partial(non_output_block_patch, block_list=input_blocks),
             )
