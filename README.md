@@ -134,13 +134,14 @@ Experimental model patch that attempts to guide either `cond` (positive prompt) 
 In other words, when applied to `cond` it will try to push it further away from what `uncond` is doing and vice versa. Stronger effect when
 applied to `cond` or output blocks. The defaults are reasonable for SD 1.5 (or as reasonable as weird stuff like this can be).
 
-Enter comma separated blocks numbers starting with one of **I**input, **O**utput or **M**iddle like `i4,m0,o4`.
+Enter comma separated blocks numbers starting with one of **I**input, **O**utput or **M**iddle like `i4,m0,o4`. You may also use `*` rather than a block
+number to select all blocks in the category, for example `i*, o*` matches all input and all output blocks.
 
 The patch can be applied to the same model multiple times.
 
-Is it good, or even doing what I think? Who knows!
+Is it good, or even doing what I think? Who knows! Both positive and negative scales seem to have positive effect on the generation. Low negative scales applied to `cond` seem to make the generation bright and colorful.
 
-_Note_: Probably only works with SD 1.x and SDXL.
+_Note_: Probably only works with SD 1.x and SDXL. Middle block patching will probably only work if you have [FreeU_Advanced](https://github.com/WASasquatch/FreeU_Advanced) installed.
 
 ### BlehBlockOps
 

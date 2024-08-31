@@ -23,7 +23,7 @@ class BlockCFGBleh:
                     "STRING",
                     {
                         "default": "i4,m0,o4",
-                        "tooltip": "Comma separated list of block numbers, each should start with one of i(input), m(iddle), o(utput)",
+                        "tooltip": "Comma separated list of block numbers, each should start with one of i(input), m(iddle), o(utput). You may also use * instead of a block number to select all blocks in the category.",
                     },
                 ),
                 "scale": (
@@ -89,16 +89,20 @@ class BlockCFGBleh:
         input_blocks = {}
         middle_blocks = {}
         output_blocks = {}
-        for item_ in commasep_block_numbers.split(","):
+        for idx, item_ in enumerate(commasep_block_numbers.split(",")):
             item = item_.strip().lower()
             if not item:
                 continue
             block_type = item[0]
-            if block_type not in "imo":
-                raise ValueError
-            block, *tidx = item[1:].split(".", 1)
-            block = int(block)
-            tidx = int(tidx) if tidx else -1
+            if block_type not in "imo" or len(item) < 2:
+                errstr = f"Bad block definition at item {idx}"
+                raise ValueError(errstr)
+            if item[1] == "*":
+                block = tidx = -1
+            else:
+                block, *tidx = item[1:].split(".", 1)
+                block = int(block)
+                tidx = int(tidx) if tidx else -1
             if block_type == "i":
                 bd = input_blocks
             else:
@@ -123,14 +127,12 @@ class BlockCFGBleh:
             sigma_tensor = transformer_options["sigmas"].max()
             sigma = sigma_tensor.detach().cpu().item()
             block_def = block_list.get(block_num)
-            return (
-                sigma_end <= sigma <= sigma_start
-                and block_def is not None
-                and (
-                    block_def == -1
-                    or block_def == transformer_options.get("transformer_index")
-                )
-            )
+            ok_time = sigma_end <= sigma <= sigma_start
+            if not ok_time:
+                return False
+            if block_def is None:
+                return -1 in block_list
+            return block_def in {-1, transformer_options.get("transformer_index")}
 
         def apply_cfg_fun(tensor, primary_offset):
             secondary_offset = 0 if primary_offset == 1 else 1
@@ -146,10 +148,6 @@ class BlockCFGBleh:
             result[primary_idxs, ...] -= (
                 tensor[primary_idxs, ...] - tensor[secondary_idxs, ...]
             ).mul_(scale)
-            # result[primary_idxs, ...] = (
-            #     tensor[primary_idxs, ...]
-            #     + (tensor[primary_idxs, ...] - tensor[secondary_idxs, ...]) * scale
-            # )
             return result
 
         def non_output_block_patch(h, transformer_options, *, block_list):
