@@ -164,7 +164,7 @@ class DeepShrinkBleh:
                 or block_num not in block_numbers
             ):
                 return h
-            pct = 1.0 - (ms.timestep(sigma_tensor).detach().cpu() / 999)
+            pct = 1.0 - (ms.timestep(sigma_tensor).detach().cpu().item() / 999)
             if (
                 pct < start_fadeout_percent
                 or start_fadeout_percent > end_percent
