@@ -145,7 +145,7 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
         return cols, rows
 
     def decoded_to_image(self, samples, cols, rows):
-        batch, width, height = samples.shape[:-1]
+        batch, height, width = samples.shape[:-1]
         samples = samples.to(
             device="cpu",
             dtype=torch.uint8,
