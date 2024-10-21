@@ -123,6 +123,12 @@ class BlockCFGBleh:
         reverse = apply_to != "cond"
 
         def check_applies(block_list, transformer_options):
+            cond_or_uncond = transformer_options["cond_or_uncond"]
+            if (
+                not (0 in cond_or_uncond and 1 in cond_or_uncond)
+                or len(cond_or_uncond) != 2
+            ):
+                return False
             block_num = transformer_options["block"][1]
             sigma_tensor = transformer_options["sigmas"].max()
             sigma = sigma_tensor.detach().cpu().item()
@@ -152,24 +158,25 @@ class BlockCFGBleh:
 
         def non_output_block_patch(h, transformer_options, *, block_list):
             cond_or_uncond = transformer_options["cond_or_uncond"]
-            if len(cond_or_uncond) != 2 or not check_applies(
+            if not check_applies(
                 block_list,
                 transformer_options,
             ):
                 return h
-            return apply_cfg_fun(h, cond_or_uncond[0])
+            return apply_cfg_fun(h, cond_or_uncond.index(0))
 
         def output_block_patch(h, hsp, transformer_options, *, block_list):
             cond_or_uncond = transformer_options["cond_or_uncond"]
-            if len(cond_or_uncond) != 2 or not check_applies(
+            if not check_applies(
                 block_list,
                 transformer_options,
             ):
                 return h, hsp
+            cond_idx = cond_or_uncond.index(0)
             return (
-                (apply_cfg_fun(h, cond_or_uncond[0]), hsp)
+                (apply_cfg_fun(h, cond_idx), hsp)
                 if not skip_mode
-                else (h, apply_cfg_fun(hsp, cond_or_uncond[0]))
+                else (h, apply_cfg_fun(hsp, cond_idx))
             )
 
         m = model.clone()

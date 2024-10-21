@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from typing import Any, Callable, NamedTuple
 
 import torch
@@ -104,7 +105,20 @@ class BlehForceSeedSampler:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {"sampler": ("SAMPLER",)},
+            "required": {
+                "sampler": ("SAMPLER",),
+            },
+            "optional": {
+                "seed_offset": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 0,
+                        "max": 200,
+                        "tooltip": "Advances the RNG this many times to avoid the mistake of using the same noise for sampling as the initial noise. I recommend leaving this at 1 (or higher) but you can set it to 0. to disable",
+                    },
+                ),
+            },
         }
 
     FUNCTION = "go"
@@ -112,11 +126,16 @@ class BlehForceSeedSampler:
     def go(
         self,
         sampler: object,
+        seed_offset: None | int = 1,
     ) -> tuple[KSAMPLER, SamplerChain]:
         return (
             KSAMPLER(
                 self.sampler_function,
-                extra_options=sampler.extra_options | {"bleh_wrapped_sampler": sampler},
+                extra_options=sampler.extra_options
+                | {
+                    "bleh_wrapped_sampler": sampler,
+                    "bleh_seed_offset": seed_offset,
+                },
                 inpaint_options=sampler.inpaint_options | {},
             ),
         )
@@ -125,17 +144,26 @@ class BlehForceSeedSampler:
     @torch.no_grad()
     def sampler_function(
         cls,
+        model: object,
+        x: torch.Tensor,
         *args: list[Any],
         extra_args: None | dict[str, Any] = None,
         bleh_wrapped_sampler: object | None = None,
+        bleh_seed_offset: None | int = 1,
         **kwargs: dict[str, Any],
     ):
         if not bleh_wrapped_sampler:
             raise ValueError("wrapped sampler missing!")
         seed = (extra_args or {}).get("seed")
         if seed is not None:
+            random.seed(seed)
             torch.manual_seed(seed)
+            for _ in range(bleh_seed_offset if bleh_seed_offset is not None else 0):
+                _ = random.random()  # noqa: S311
+                _ = torch.randn_like(x)
         return bleh_wrapped_sampler.sampler_function(
+            model,
+            x,
             *args,
             extra_args=extra_args,
             **kwargs,

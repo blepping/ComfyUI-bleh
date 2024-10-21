@@ -91,6 +91,8 @@ Adapted from the ComfyUI source which I presume was adapted from the version Koh
 
 ### BlehInsaneChainSampler
 
+**Note**: I'd recommend using my [Overly Complicated Sampling](https://github.com/blepping/comfyui_overly_complicated_sampling) node pack over this. It generally has better tools for scheduling samplers.
+
 A picture is worth a thousand words, so:
 
 ![Insane chain example](assets/insane_chain_example.png)
@@ -142,6 +144,8 @@ The patch can be applied to the same model multiple times.
 Is it good, or even doing what I think? Who knows! Both positive and negative scales seem to have positive effect on the generation. Low negative scales applied to `cond` seem to make the generation bright and colorful.
 
 _Note_: Probably only works with SD 1.x and SDXL. Middle block patching will probably only work if you have [FreeU_Advanced](https://github.com/WASasquatch/FreeU_Advanced) installed.
+
+**Note**: Doesn't work correctly with Tiled Diffusion when using tile batch sizes over 1.
 
 ### BlehBlockOps
 

@@ -2,6 +2,10 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20241021
+
+* Added `seed_offset` parameter to `BlehDisableNoise` and `BlehForceSeedSampler` nodes. This is to avoid a case where the same noise would be used during sampling as the initial noise. **Note**: Changes seeds. You can set `seed_offset` to 0 to get the same behavior as before.
+
 ## 20240830
 
 * Added the `BlehBlockCFG` node (see README for usage and details).
