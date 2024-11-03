@@ -116,6 +116,14 @@ Basically the same idea as `BlehForceSeedSampler`, however it is usable with `Sa
 
 You can connect this node to any input and it will be the same as if the input had no connection. Why is this useful? It's mainly for [Use Everywhere](https://github.com/chrisgoringe/cg-use-everywhere) — sometimes it's desirable to leave an input unconnected, but if you have Use Everywhere broadcasting an output it can be inconvenient. Just shove a plug in those inputs.
 
+### BlehSetSamplerPreset
+
+Allows associating a `SAMPLER` with a name in list of samplers so you can use a custom sampler in places that do not allow custom sampling - FaceDetailer for example. You can adjust the number of presets by setting the environment variable `COMFYUI_BLEH_SAMPLER_PRESET_COUNT` - it defaults to 1 if unset.
+
+This node needs to run before sampling with the preset starts - in takes a wildcard input with can be used to pass through something like the model or latent just to make sure the node runs before the sampler. **Note**: Since the input and outputs are wildcards, ComfyUI's normal type checking does not apply here - be sure you connect the output to something that expects the input. For example, if you connect a `MODEL` then ComfyUI will let you connect that to something expecting `LATENT` which won't work very well.
+
+It's also possible to override the sigmas used for sampling - possibly to do stuff like using Restart sampling in nodes that don't currently allow you to pass in sigmas. This is an advanced option, if you don't know you need it then I suggest not connecting anything here. *Note*: If the sampler is adding noise then you likely will get poor results if the two sets of sigmas start at different values.
+
 ### BlehRefinerAfter
 
 Allows switching to a refiner model at a predefined time. There are three time modes:

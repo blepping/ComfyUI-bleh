@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import contextlib
+import importlib
 import random
+from copy import deepcopy
+from functools import partial
+from os import environ
 from typing import Any, Callable, NamedTuple
 
 import torch
-from comfy.samplers import KSAMPLER
+from comfy.samplers import KSAMPLER, KSampler, k_diffusion_sampling
 from tqdm import tqdm
+
+from .misc import Wildcard
+
+BLEH_PRESET_LIMIT = 16
+BLEH_PRESET_COUNT = 1
+with contextlib.suppress(Exception):
+    BLEH_PRESET_COUNT = min(
+        BLEH_PRESET_LIMIT,
+        max(
+            0,
+            int(environ.get("COMFYUI_BLEH_SAMPLER_PRESET_COUNT", 1)),
+        ),
+    )
 
 
 class SamplerChain(NamedTuple):
@@ -168,3 +186,123 @@ class BlehForceSeedSampler:
             extra_args=extra_args,
             **kwargs,
         )
+
+
+BLEH_PRESET = [None] * BLEH_PRESET_COUNT
+
+
+def bleh_sampler_preset_wrapper(
+    preset_idx,
+    model,
+    x,
+    sigmas,
+    *args: list,
+    **kwargs: dict,
+) -> torch.Tensor:
+    if not (0 <= preset_idx < BLEH_PRESET_COUNT):
+        raise ValueError("Bleh sampler preset out of range")
+    preset = BLEH_PRESET[preset_idx]
+    if preset is None:
+        errstr = f"Cannot use bleh_preset_{preset_idx} - present not defined. Ensure BlehSetSamplerPreset runs before sampling."
+        raise RuntimeError(errstr)
+    sampler, override_sigmas = preset
+    if override_sigmas is not None:
+        sigmas = override_sigmas.detach().clone().to(sigmas)
+    return sampler.sampler_function(
+        model,
+        x,
+        sigmas,
+        *args,
+        **sampler.extra_options,
+        **kwargs,
+    )
+
+
+def add_sampler_presets():
+    if BLEH_PRESET_COUNT < 1:
+        return
+    for idx in range(BLEH_PRESET_COUNT):
+        key = f"bleh_preset_{idx}"
+        KSampler.SAMPLERS.append(key)
+        setattr(
+            k_diffusion_sampling,
+            f"sample_{key}",
+            partial(bleh_sampler_preset_wrapper, idx),
+        )
+    importlib.reload(k_diffusion_sampling)
+
+
+class BlehSetSamplerPreset:
+    WILDCARD = Wildcard("*")
+    DESCRIPTION = "This node allows setting a custom sampler as a preset that can be selected in nodes that don't support custom sampling (FaceDetailer for example). This node needs to run at least once with any preset changes before actual sampling begins. the `any_input` input acts as a passthrough so you can do something like pass your model or latent through before you start sampling to ensure the node runs. The number of presets can be adjusted (and the whole feature disabled if desired) by setting the environment variable `COMFYUI_BLEH_SAMPLER_PRESET_COUNT`. WARNING: Since the input and output are wildcards, this bypasses ComfyUI's normal type checking. Make sure you connect the output to something that actually accepts the input type."
+    RETURN_TYPES = (WILDCARD,)
+    OUTPUT_TOOLTIPS = (
+        "This just passes through the value from any_input. WARNING: ComfyUI's normal typechecking is disabled here, make sure you connect this output to something that allows the input type.",
+    )
+    CATEGORY = "hacks"
+    NOT_IDEMPOTENT = True
+    FUNCTION = "go"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sampler": ("SAMPLER", {"tooltip": "Sampler to use for this preset."}),
+                "any_input": (cls.WILDCARD,),
+                "preset": (
+                    "INT",
+                    {
+                        "min": -1,
+                        "max": BLEH_PRESET_COUNT - 1,
+                        "default": 0 if BLEH_PRESET_COUNT > 0 else -1,
+                        "tooltip": "Preset index to set. If set to -1, nothing happens. The number of presets can be adjusted, see the README.",
+                    },
+                ),
+                "discard_penultimate_sigma": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Advanced option to enabling discarding the penultimate sigma. May be needed for some samplers like dpmpp_3m_sde - if it seems like the generation has a bunch of noise added at the very last step then you can try enabling this. Note: Cannot be used when override sigmas are attached.",
+                    },
+                ),
+            },
+            "optional": {
+                "override_sigmas_opt": (
+                    "SIGMAS",
+                    {
+                        "tooltip": "Advanced option that allows overriding the sigmas used for sampling. Note: Cannot be used with discard_penultimate_sigma. Also this cannot control the noise added by the sampler, so if the schedules start on different sigmas you likely will get the wrong amount of noise.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def go(
+        cls,
+        *,
+        sampler,
+        any_input,
+        preset,
+        discard_penultimate_sigma,
+        override_sigmas_opt: None | torch.Tensor = None,
+    ):
+        if not (0 <= preset < BLEH_PRESET_COUNT):
+            return (any_input,)
+        if discard_penultimate_sigma and override_sigmas_opt is not None:
+            raise ValueError(
+                "BlehSetSamplerPreset: Cannot override sigmas and also enable discard penultimate sigma",
+            )
+        dps_samplers = getattr(KSampler, "DISCARD_PENULTIMATE_SIGMA_SAMPLERS", None)
+        if dps_samplers is not None:
+            key = f"bleh_preset_{preset}"
+            if discard_penultimate_sigma:
+                dps_samplers.update(key)
+            else:
+                dps_samplers -= {key}
+        sigmas = (
+            None
+            if override_sigmas_opt is None
+            else override_sigmas_opt.detach().clone().cpu()
+        )
+        BLEH_PRESET[preset] = (deepcopy(sampler), sigmas)
+        return (any_input,)
