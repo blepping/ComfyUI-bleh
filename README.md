@@ -118,11 +118,11 @@ You can connect this node to any input and it will be the same as if the input h
 
 ### BlehSetSamplerPreset
 
-Allows associating a `SAMPLER` with a name in list of samplers so you can use a custom sampler in places that do not allow custom sampling - FaceDetailer for example. You can adjust the number of presets by setting the environment variable `COMFYUI_BLEH_SAMPLER_PRESET_COUNT` - it defaults to 1 if unset.
+Allows associating a `SAMPLER` with a name in list of samplers (`bleh_preset_0`, etc) so you can use a custom sampler in places that do not allow custom sampling - FaceDetailer for example. You can adjust the number of presets by setting the environment variable `COMFYUI_BLEH_SAMPLER_PRESET_COUNT` - it defaults to 1 if unset. If set to 0, no sampler presets will be added to the list.
 
-This node needs to run before sampling with the preset starts - in takes a wildcard input with can be used to pass through something like the model or latent just to make sure the node runs before the sampler. **Note**: Since the input and outputs are wildcards, ComfyUI's normal type checking does not apply here - be sure you connect the output to something that expects the input. For example, if you connect a `MODEL` then ComfyUI will let you connect that to something expecting `LATENT` which won't work very well.
+This node needs to run before sampling with the preset begins - it takes a wildcard input with can be used to pass through something like the model or latent to make sure the node runs before sampling. **Note**: Since the input and outputs are wildcards, ComfyUI's normal type checking does not apply here - be sure you connect the output to something that supports the input type. For example, if you connect a `MODEL` to `any_input`, ComfyUI will let you connect that to something expecting `LATENT` which won't work very well.
 
-It's also possible to override the sigmas used for sampling - possibly to do stuff like using Restart sampling in nodes that don't currently allow you to pass in sigmas. This is an advanced option, if you don't know you need it then I suggest not connecting anything here. *Note*: If the sampler is adding noise then you likely will get poor results if the two sets of sigmas start at different values.
+It's also possible to override the sigmas used for sampling - possibly to do something like Restart sampling in nodes that don't currently allow you to pass in sigmas. This is an advanced option, if you don't know that you need it then I suggest not connecting anything here. *Note*: If the sampler is adding noise then you likely will get poor results if the two sets of sigmas start at different values.
 
 ### BlehRefinerAfter
 

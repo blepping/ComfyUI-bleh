@@ -234,7 +234,7 @@ def add_sampler_presets():
 
 class BlehSetSamplerPreset:
     WILDCARD = Wildcard("*")
-    DESCRIPTION = "This node allows setting a custom sampler as a preset that can be selected in nodes that don't support custom sampling (FaceDetailer for example). This node needs to run at least once with any preset changes before actual sampling begins. the `any_input` input acts as a passthrough so you can do something like pass your model or latent through before you start sampling to ensure the node runs. The number of presets can be adjusted (and the whole feature disabled if desired) by setting the environment variable `COMFYUI_BLEH_SAMPLER_PRESET_COUNT`. WARNING: Since the input and output are wildcards, this bypasses ComfyUI's normal type checking. Make sure you connect the output to something that actually accepts the input type."
+    DESCRIPTION = "This node allows setting a custom sampler as a preset that can be selected in nodes that don't support custom sampling (FaceDetailer for example). This node needs to run at least once with any preset changes before actual sampling begins. The any_input input acts as a passthrough so you can do something like pass your model or latent through before you start sampling to ensure the node runs. The number of presets can be adjusted (and the whole feature disabled if desired) by setting the environment variable COMFYUI_BLEH_SAMPLER_PRESET_COUNT. WARNING: Since the input and output are wildcards, this bypasses ComfyUI's normal type checking. Make sure you connect the output to something that actually accepts the input type."
     RETURN_TYPES = (WILDCARD,)
     OUTPUT_TOOLTIPS = (
         "This just passes through the value from any_input. WARNING: ComfyUI's normal typechecking is disabled here, make sure you connect this output to something that allows the input type.",
@@ -248,21 +248,26 @@ class BlehSetSamplerPreset:
         return {
             "required": {
                 "sampler": ("SAMPLER", {"tooltip": "Sampler to use for this preset."}),
-                "any_input": (cls.WILDCARD,),
+                "any_input": (
+                    cls.WILDCARD,
+                    {
+                        "tooltip": "This input is simply returned as the output. Note: Make sure you connect this node's output to something that supports input connected here.",
+                    },
+                ),
                 "preset": (
                     "INT",
                     {
                         "min": -1,
                         "max": BLEH_PRESET_COUNT - 1,
                         "default": 0 if BLEH_PRESET_COUNT > 0 else -1,
-                        "tooltip": "Preset index to set. If set to -1, nothing happens. The number of presets can be adjusted, see the README.",
+                        "tooltip": "Preset index to set. If -1, nothing happens. The number of presets can be adjusted, see the README.",
                     },
                 ),
                 "discard_penultimate_sigma": (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "tooltip": "Advanced option to enabling discarding the penultimate sigma. May be needed for some samplers like dpmpp_3m_sde - if it seems like the generation has a bunch of noise added at the very last step then you can try enabling this. Note: Cannot be used when override sigmas are attached.",
+                        "tooltip": "Advanced option to allow discarding the penultimate sigma. May be needed for some samplers like dpmpp_3m_sde - if it seems like the generation has a bunch of noise added at the very last step then you can try enabling this. Note: Cannot be used when override sigmas are attached.",
                     },
                 ),
             },
@@ -270,7 +275,7 @@ class BlehSetSamplerPreset:
                 "override_sigmas_opt": (
                     "SIGMAS",
                     {
-                        "tooltip": "Advanced option that allows overriding the sigmas used for sampling. Note: Cannot be used with discard_penultimate_sigma. Also this cannot control the noise added by the sampler, so if the schedules start on different sigmas you likely will get the wrong amount of noise.",
+                        "tooltip": "Advanced option that allows overriding the sigmas used for sampling. Note: Cannot be used with discard_penultimate_sigma. Also this cannot control the noise added by the sampler, so if the schedules start on different sigmas you will likely run into issues.",
                     },
                 ),
             },
