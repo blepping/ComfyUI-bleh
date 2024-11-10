@@ -234,10 +234,10 @@ def add_sampler_presets():
 
 class BlehSetSamplerPreset:
     WILDCARD = Wildcard("*")
-    DESCRIPTION = "This node allows setting a custom sampler as a preset that can be selected in nodes that don't support custom sampling (FaceDetailer for example). This node needs to run at least once with any preset changes before actual sampling begins. The any_input input acts as a passthrough so you can do something like pass your model or latent through before you start sampling to ensure the node runs. The number of presets can be adjusted (and the whole feature disabled if desired) by setting the environment variable COMFYUI_BLEH_SAMPLER_PRESET_COUNT. WARNING: Since the input and output are wildcards, this bypasses ComfyUI's normal type checking. Make sure you connect the output to something that actually accepts the input type."
+    DESCRIPTION = "This node allows setting a custom sampler as a preset that can be selected in nodes that don't support custom sampling (FaceDetailer for example). This node needs to run at least once with any preset changes before actual sampling begins. The any_input input acts as a passthrough so you can do something like pass your model or latent through before you start sampling to ensure the node runs. You can also connect something like an integer or string to the dummy_opt input and change it to force the node to run again. The number of presets can be adjusted (and the whole feature disabled if desired) by setting the environment variable COMFYUI_BLEH_SAMPLER_PRESET_COUNT. WARNING: Since the input and output are wildcards, this bypasses ComfyUI's normal type checking. Make sure you connect the output to something that actually accepts the input type."
     RETURN_TYPES = (WILDCARD,)
     OUTPUT_TOOLTIPS = (
-        "This just passes through the value from any_input. WARNING: ComfyUI's normal typechecking is disabled here, make sure you connect this output to something that allows the input type.",
+        "This just returns the value of any_input unchanged. WARNING: ComfyUI's normal typechecking is disabled here, make sure you connect this output to something that allows the input type.",
     )
     CATEGORY = "hacks"
     NOT_IDEMPOTENT = True
@@ -260,7 +260,7 @@ class BlehSetSamplerPreset:
                         "min": -1,
                         "max": BLEH_PRESET_COUNT - 1,
                         "default": 0 if BLEH_PRESET_COUNT > 0 else -1,
-                        "tooltip": "Preset index to set. If -1, nothing happens. The number of presets can be adjusted, see the README.",
+                        "tooltip": "Preset index to set. If set to -1, no preset assignment will be done. The number of presets can be adjusted, see the README.",
                     },
                 ),
                 "discard_penultimate_sigma": (
@@ -275,7 +275,13 @@ class BlehSetSamplerPreset:
                 "override_sigmas_opt": (
                     "SIGMAS",
                     {
-                        "tooltip": "Advanced option that allows overriding the sigmas used for sampling. Note: Cannot be used with discard_penultimate_sigma. Also this cannot control the noise added by the sampler, so if the schedules start on different sigmas you will likely run into issues.",
+                        "tooltip": "Advanced option that allows overriding the sigmas used for sampling. Note: Cannot be used with discard_penultimate_sigma. Also this cannot control the noise added by the sampler, so if the schedule used by the sampler starts on a different sigma than the override you will likely run into issues.",
+                    },
+                ),
+                "dummy_opt": (
+                    cls.WILDCARD,
+                    {
+                        "tooltip": "This input can optionally be connected to any value as a way to force the node to run again on demand. See the README.",
                     },
                 ),
             },
@@ -290,6 +296,7 @@ class BlehSetSamplerPreset:
         preset,
         discard_penultimate_sigma,
         override_sigmas_opt: None | torch.Tensor = None,
+        dummy_opt=None,  # noqa: ARG003
     ):
         if not (0 <= preset < BLEH_PRESET_COUNT):
             return (any_input,)
