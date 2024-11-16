@@ -118,6 +118,8 @@ class PatchTypeSamplerPostCfgFunction(PatchTypeModel):
 
     @classmethod
     def _call(cls, patches, opts):
+        if not patches:
+            return opts["denoised"]
         curr_opts = opts.copy()
         key = cls._call_result_key
         for p in patches:
