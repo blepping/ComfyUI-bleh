@@ -1,3 +1,4 @@
+import logging
 import math
 from time import time
 
@@ -173,7 +174,13 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
             return self.cached
         if x0.shape[0] == 0:
             return self.blank  # Shouldn't actually be possible.
-        return self.decoded_to_image(*self._decode_latent(x0))
+        try:
+            return self.decoded_to_image(*self._decode_latent(x0))
+        except torch.OutOfMemoryError:
+            logging.warning(
+                "*** BlehBetterTAESDPreviews: Got out of memory error while decoding preview - skipping.",
+            )
+            return self.blank
 
 
 if not isinstance(latent_preview.TAESDPreviewerImpl, BetterTAESDPreviewer):

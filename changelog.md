@@ -2,6 +2,10 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20241122
+
+* Added the `BlehGlobalSageAttention` and `BlehSageAttentionSampler` nodes. See the README for details.
+
 ## 20241103
 
 * Added the `BlehSetSamplerPreset` node and sampler presets feature.

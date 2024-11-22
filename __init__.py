@@ -15,6 +15,7 @@ from .py.nodes import (
     modelPatchConditional,
     ops,
     refinerAfter,
+    sageAttention,
     samplers,
 )
 
@@ -27,6 +28,7 @@ NODE_CLASS_MAPPINGS = {
     "BlehDisableNoise": misc.BlehDisableNoise,
     "BlehDiscardPenultimateSigma": misc.DiscardPenultimateSigma,
     "BlehForceSeedSampler": samplers.BlehForceSeedSampler,
+    "BlehGlobalSageAttention": sageAttention.BlehGlobalSageAttention,
     "BlehHyperTile": hyperTile.HyperTileBleh,
     "BlehInsaneChainSampler": samplers.BlehInsaneChainSampler,
     "BlehLatentOps": ops.BlehLatentOps,
@@ -34,6 +36,7 @@ NODE_CLASS_MAPPINGS = {
     "BlehModelPatchConditional": modelPatchConditional.ModelPatchConditionalNode,
     "BlehPlug": misc.BlehPlug,
     "BlehRefinerAfter": refinerAfter.BlehRefinerAfter,
+    "BlehSageAttentionSampler": sageAttention.BlehSageAttentionSampler,
     "BlehSetSamplerPreset": samplers.BlehSetSamplerPreset,
 }
 
