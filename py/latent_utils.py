@@ -2,12 +2,15 @@
 #   Blending, slice and filtering functions based on https://github.com/WASasquatch/FreeU_Advanced
 from __future__ import annotations
 
+import contextlib
 import math
 import os
+from functools import partial
 
 import kornia.filters as kf
 import numpy as np
 import torch
+import torch.nn.functional as nnf
 from torch import FloatTensor, LongTensor, fft
 
 OVERRIDE_NO_SCALE = "COMFYUI_BLEH_OVERRIDE_NO_SCALE" in os.environ
@@ -87,15 +90,20 @@ def hslerp_alt(a, b, t):
 
 
 # This should be more correct but the results are worse. :(
-def hslerp_alt_(a, b, t):
+def hslerp_alt2(a, b, t, *, sign_order=(1.0, -1.0), sign_threshold=0.5):
     if a.shape != b.shape:
         raise ValueError("Input tensors a and b must have the same shape.")
     t_expanded = t.broadcast_to(a.shape[-2:])
     while t_expanded.ndim < a.ndim:
         t_expanded = t_expanded.unsqueeze(0)
-    interp = torch.where(t_expanded < 0.5, 1.0, -1.0)
-    result = (1 - t) * a + t * b
-    return result.add_((torch.norm(b - a, dim=1, keepdim=True) / 6) * interp)
+    return (
+        ((1 - t) * a)
+        .add_(t * b)
+        .add_(
+            torch.norm(b - a, dim=1, keepdim=True).div_(6)
+            * torch.where(t_expanded.abs() < sign_threshold, *sign_order),
+        )
+    )
 
 
 # Copied from ComfyUI
@@ -242,26 +250,48 @@ BLENDING_MODES = {
     #   - b (tensor): Latent input 2
     #   - t (float): Blending factor
     # Interpolates between tensors a and b using normalized linear interpolation.
-    "bislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b),
+    "bislerp": BlendMode(
+        lambda a, b, t: ((1 - t) * a).add_(t * b),
+        normalize,
+    ),
     # "nbislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b, normalize),
-    "slerp": BlendMode(lambda a, b, t: altslerp(a, b, t, dim=0)),
+    "slerp": BlendMode(lambda a, b, t: altslerp(a, b, t, dim=-1)),
     # Transfer the color from `b` to `a` by t` factor
-    "colorize": BlendMode(lambda a, b, t: a + (b - a) * t),
+    "colorize": BlendMode(lambda a, b, t: (b - a).mul_(t).add_(a)),
     # Interpolates between tensors a and b using cosine interpolation.
     "cosinterp": BlendMode(
-        lambda a, b, t: (a + b - (a - b) * torch.cos(t * torch.tensor(math.pi))) / 2,
+        lambda a, b, t: (
+            (a + b).sub_((a - b).mul_(torch.cos(t * torch.tensor(math.pi))))
+        ).div_(2),
     ),
     # Interpolates between tensors a and b using cubic interpolation.
-    "cuberp": BlendMode(lambda a, b, t: a + (b - a) * (3 * t**2 - 2 * t**3)),
+    "cuberp": BlendMode(lambda a, b, t: (b - a).mul_(3 * t**2 - 2 * t**3).add_(a)),
     # Interpolates between tensors a and b using normalized linear interpolation,
     # with a twist when t is greater than or equal to 0.5.
     "hslerp": BlendMode(hslerp),
+    "hslerpalt": BlendMode(hslerp_alt2),
+    "hslerpalt110x": BlendMode(partial(hslerp_alt2, sign_order=(1.1, -1.1))),
+    "hslerpalt125x": BlendMode(partial(hslerp_alt2, sign_order=(1.25, -1.25))),
+    "hslerpalt150x": BlendMode(partial(hslerp_alt2, sign_order=(1.5, -1.5))),
+    "hslerpalt300x": BlendMode(partial(hslerp_alt2, sign_order=(3.0, -3.0))),
+    "hslerpaltflipsign": BlendMode(partial(hslerp_alt2, sign_order=(-1.0, 1.0))),
+    "hslerpaltflipsign110x": BlendMode(partial(hslerp_alt2, sign_order=(-1.1, 1.1))),
+    "hslerpaltflipsign125x": BlendMode(partial(hslerp_alt2, sign_order=(-1.25, 1.25))),
+    "hslerpaltflipsign150x": BlendMode(partial(hslerp_alt2, sign_order=(-1.5, 1.5))),
+    "hslerpaltflipsign300x": BlendMode(partial(hslerp_alt2, sign_order=(-3.0, 3.0))),
     # Adds tensor b to tensor a, scaled by t.
-    "inject": BlendMode(lambda a, b, t: a + b * t),
+    "inject": BlendMode(lambda a, b, t: (b * t).add_(a)),
+    "injecthalf": BlendMode(lambda a, b, t: (b * (t * 0.5)).add_(a)),
+    "injectquarter": BlendMode(lambda a, b, t: (b * (t * 0.25)).add_(a)),
     # Interpolates between tensors a and b using linear interpolation.
-    "lerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b),
+    "lerp": BlendMode(lambda a, b, t: ((1 - t) * a).add_(t * b)),
+    "lerp050x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.5)),
+    "lerp075x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.75)),
+    "lerp110x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.1)),
+    "lerp125x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.25)),
+    "lerp150x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.5)),
     # Simulates a brightening effect by adding tensor b to tensor a, scaled by t.
-    "lineardodge": BlendMode(lambda a, b, t: a + b * t),
+    "lineardodge": BlendMode(lambda a, b, t: (b * t).add_(a)),
     # "nlineardodge": BlendMode(lambda a, b, t: a + b * t, normalize),
     # Simulates a brightening effect by dividing a by (1 - b) with a small epsilon to avoid division by zero.
     "colordodge": BlendMode(lambda a, b, _t: a / (1 - b + 1e-6), allow_scale=False),
@@ -295,7 +325,7 @@ BLENDING_MODES = {
         lambda a, b, _t: torch.where(b <= 0.5, a + 2 * b - 1, a + 2 * (b - 0.5)),
     ),
     "multiply": BlendMode(
-        lambda a, b, t: a * t * b * t,
+        lambda a, b, t: (a * t).mul_(b * t),
         normalize,
         allow_scale=False,
     ),
@@ -336,6 +366,28 @@ BLENDING_MODES = {
     ),
 }
 
+with contextlib.suppress(ImportError):
+    import importlib
+
+    ddare = importlib.import_module("ComfyUI-DareMerge.ddare.merge")
+    BLENDING_MODES |= {
+        f"DARE{k}": BlendMode(partial(ddare.merge_tensors, k)) for k in ddare.METHODS
+    }
+    for k_ in ("slice", "cyclic", "gradient", "hslerp"):
+        k = f"DARE{k_}"
+        derp = BLENDING_MODES[k]
+        BLENDING_MODES[f"DARE{k_}max"] = derp.edited(
+            f=lambda a, b, t, _f=derp.f: _f(a, b, t.max()),
+        )
+        BLENDING_MODES[f"DARE{k_}min"] = derp.edited(
+            f=lambda a, b, t, _f=derp.f: _f(a, b, t.min()),
+        )
+        BLENDING_MODES[f"DARE{k_}std"] = derp.edited(
+            f=lambda a, b, t, _f=derp.f: _f(a, b, t.std()),
+        )
+        derp.f = lambda a, b, t, _f=derp.f: _f(a, b, t.mean())
+
+
 BLENDING_MODES |= {
     f"norm{k}": v.edited(norm=normalize)
     for k, v in BLENDING_MODES.items()
@@ -347,7 +399,7 @@ BLENDING_MODES |= {f"rev{k}": v.edited(rev=True) for k, v in BLENDING_MODES.item
 BIDERP_MODES = {
     k: v.edited(norm_dims=0)
     for k, v in BLENDING_MODES.items()
-    if (v.allow_scale or OVERRIDE_NO_SCALE) and not k.endswith("slerp")
+    if (v.allow_scale or OVERRIDE_NO_SCALE) and ("DARE" in k or not k.endswith("slerp"))
 }
 
 BIDERP_MODES |= {
@@ -443,6 +495,12 @@ UPSCALE_METHODS = (
     "nearest-exact",
     "bilinear",
     "area",
+    "adaptive_avg_pool2d",
+    "adaptive_max_pool2d",
+    "fractional_max_pool2d",
+    "lp_pool2d_1",
+    "lp_pool2d_2",
+    "lp_pool2d_4",
     *BIDERP_MODES.keys(),
     *(
         f"{meth}+{enh}"
@@ -483,7 +541,7 @@ def make_filter(channels, dtype, size=3):
 def antialias_tensor(x, antialias_size):
     channels = x.shape[1]
     filt = make_filter(channels, x.dtype, antialias_size).to(x.device)
-    return torch.nn.functional.conv2d(x, filt, groups=channels, padding="same")
+    return nnf.conv2d(x, filt, groups=channels, padding="same")
 
 
 def enhance_tensor(  # noqa: PLR0911
@@ -601,11 +659,30 @@ def scale_samples(
         )
         mode_h = mode
     if mode in {"bicubic", "nearest-exact", "bilinear", "area"}:
-        result = torch.nn.functional.interpolate(
+        result = nnf.interpolate(
             samples,
             size=(height, width),
             mode=mode,
             antialias=antialias_size > 7,
+        )
+    elif mode == "adaptive_avg_pool2d":
+        result = nnf.adaptive_avg_pool2d(samples, (height, width))
+    elif mode == "adaptive_max_pool2d":
+        result = nnf.adaptive_max_pool2d(samples, (height, width))
+    elif mode == "fractional_max_pool2d":
+        h, w = samples.shape[-2:]
+        result = nnf.fractional_max_pool2d(
+            samples,
+            kernel_size=3,
+            output_ratio=(height / h, width / w),
+        )
+    elif mode.startswith("lp_pool2d_"):
+        h, w = samples.shape[-2:]
+        result = nnf.lp_pool2d(
+            samples,
+            float(mode.rsplit("_", 1)[1]),
+            kernel_size=(int(h // height), int(w // width)),
+            ceil_mode=True,
         )
     else:
         result = biderp(samples, width, height, mode, mode_h)
@@ -635,7 +712,7 @@ def biderp(samples, width, height, mode="bislerp", mode_h=None):  # noqa: PLR091
         coords_1 = torch.arange(length_old, dtype=torch.float32, device=device).reshape(
             (1, 1, 1, -1),
         )
-        coords_1 = torch.nn.functional.interpolate(
+        coords_1 = nnf.interpolate(
             coords_1,
             size=(1, length_new),
             mode="bilinear",
@@ -650,7 +727,7 @@ def biderp(samples, width, height, mode="bislerp", mode_h=None):  # noqa: PLR091
             + 1
         )
         coords_2[:, :, :, -1] -= 1
-        coords_2 = torch.nn.functional.interpolate(
+        coords_2 = nnf.interpolate(
             coords_2,
             size=(1, length_new),
             mode="bilinear",
