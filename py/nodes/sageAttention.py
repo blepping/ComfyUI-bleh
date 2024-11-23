@@ -27,7 +27,7 @@ def attention_sage(  # noqa: PLR0917
     attn_precision=None,
     skip_reshape=False,
     sageattn_allow_head_sizes: None | set | tuple | list = None,
-    sageattn_function=sageattention.sageattn if sageattention is not None else None,
+    sageattn_function=sageattention.sageattn,
     sageattn_verbose=False,
     **kwargs: dict[str],
 ):
