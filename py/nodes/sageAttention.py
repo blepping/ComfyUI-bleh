@@ -10,7 +10,7 @@ from comfy.samplers import KSAMPLER
 try:
     import sageattention
 except ImportError:
-    sageattn = None
+    sageattention = None
 
 if TYPE_CHECKING:
     import torch
