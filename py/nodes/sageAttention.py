@@ -26,7 +26,7 @@ def attention_sage(  # noqa: PLR0917
     mask=None,
     attn_precision=None,
     skip_reshape=False,
-    sageattn_allow_head_sizes: None | set | tuple | list = None,
+    sageattn_allow_head_sizes: set | tuple | list | None = None,
     sageattn_function=sageattention.sageattn if sageattention is not None else None,
     sageattn_verbose=False,
     **kwargs: dict[str],
@@ -97,7 +97,7 @@ def monkeypatch_attention(enabled: bool, **kwargs: dict[str]):
     )
 
 
-def get_yaml_parameters(yaml_parameters: None | str = None) -> dict:
+def get_yaml_parameters(yaml_parameters: str | None = None) -> dict:
     if not yaml_parameters:
         return {}
     extra_params = yaml.safe_load(yaml_parameters)
@@ -124,6 +124,8 @@ class BlehGlobalSageAttention:
                     "BOOLEAN",
                     {"default": True},
                 ),
+            },
+            "optional": {
                 "yaml_parameters": (
                     "STRING",
                     {
@@ -137,7 +139,7 @@ class BlehGlobalSageAttention:
         }
 
     @classmethod
-    def go(cls, *, model: object, enabled: bool, yaml_parameters: None | str = None):
+    def go(cls, *, model: object, enabled: bool, yaml_parameters: str | None = None):
         if sageattention is None:
             raise RuntimeError(
                 "sageattention not installed to Python environment: SageAttention feature unavailable",
@@ -242,7 +244,7 @@ class BlehSageAttentionSampler:
         *,
         start_percent=0.0,
         end_percent=1.0,
-        yaml_parameters: None | str = None,
+        yaml_parameters: str | None = None,
     ) -> tuple:
         if sageattention is None:
             raise RuntimeError(
