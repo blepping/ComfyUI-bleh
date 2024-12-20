@@ -144,7 +144,7 @@ class BlehForceSeedSampler:
     def go(
         self,
         sampler: object,
-        seed_offset: None | int = 1,
+        seed_offset: int | None = 1,
     ) -> tuple[KSAMPLER, SamplerChain]:
         return (
             KSAMPLER(
@@ -165,9 +165,9 @@ class BlehForceSeedSampler:
         model: object,
         x: torch.Tensor,
         *args: list[Any],
-        extra_args: None | dict[str, Any] = None,
+        extra_args: dict[str, Any] | None = None,
         bleh_wrapped_sampler: object | None = None,
-        bleh_seed_offset: None | int = 1,
+        bleh_seed_offset: int | None = 1,
         **kwargs: dict[str, Any],
     ):
         if not bleh_wrapped_sampler:
@@ -223,6 +223,13 @@ def add_sampler_presets():
         return
     for idx in range(BLEH_PRESET_COUNT):
         key = f"bleh_preset_{idx}"
+        if key in KSampler.SAMPLERS:
+            print(
+                f"\n** ComfyUI-bleh: Warning: {key} already exists in sampler list, skipping adding preset samplers.",
+            )
+            if idx == 0:
+                return
+            break
         KSampler.SAMPLERS.append(key)
         setattr(
             k_diffusion_sampling,
@@ -295,7 +302,7 @@ class BlehSetSamplerPreset:
         any_input,
         preset,
         discard_penultimate_sigma,
-        override_sigmas_opt: None | torch.Tensor = None,
+        override_sigmas_opt: torch.Tensor | None = None,
         dummy_opt=None,  # noqa: ARG003
     ):
         if not (0 <= preset < BLEH_PRESET_COUNT):
