@@ -162,11 +162,9 @@ _Note_: Probably only works with SD 1.x and SDXL. Middle block patching will pro
 
 ### BlehSageAttentionSampler
 
-Allows using SageAttention as a sampler wrapper. SageAttention is an attention optimization. SDXL is known to work, CogVideo might? SD15 doesn't use supported head sizes. In the case where the model's head sizes aren't supported, it will fall back to the default optimized attention implementation so enabling it should be safe even on unsupported models.
+Allows using the SageAttention attention optimization as a sampler wrapper. SageAttention 2.0.1 supports head sizes up to 128 and should have some effect for most models. Earlier SageAttention versions had more limited support and, for example, didn't support any of SD1.5's head sizes. You will probably notice the biggest difference for high resolution generations.
 
-You won't see much of a performance difference at low resolutions, once you get up to 2048x2048 it starts becoming noticeable. In my testing, the difference was about 30% at 4096x4096 and 10% at 2048x2048.
-
-**Note:** Requires manually installing SageAttention into your Python environment. Should work with SageAttention 1.0 and 2.0 (2.0 currently requires CUDA 8+).
+**Note:** Requires manually installing SageAttention into your Python environment. Should work with SageAttention 1.0 and 2.0.x (2.0.x currently requires CUDA 8+). Link: https://github.com/thu-ml/SageAttention
 
 
 ### BlehGlobalSageAttention

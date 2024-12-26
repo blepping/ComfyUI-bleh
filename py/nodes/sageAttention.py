@@ -1,47 +1,114 @@
 from __future__ import annotations
 
+import contextlib
+import importlib
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
+import comfy
+import comfy_extras
 import yaml
-from comfy.ldm.modules import attention as comfy_attention
 from comfy.samplers import KSAMPLER
 
 try:
     import sageattention
+
+    sageattn_default_function = sageattention.sageattn
 except ImportError:
     sageattention = None
+    sageattn_default_head_sizes = None
+    sageattn_default_function = None
+
 
 if TYPE_CHECKING:
+    import collections
+
     import torch
 
-orig_attention = comfy_attention.optimized_attention
+
+if sageattention is not None:
+    try:
+        sageattn_version = importlib.metadata.version("sageattention")
+    except Exception:  # noqa: BLE001
+        sageattn_version = None
+    if (
+        sageattn_version is None
+        or sageattn_version.startswith("1.")
+        or sageattn_version == "2.0.0"
+    ):
+        sageattn_default_head_sizes = {64, 96, 128}
+    else:
+        # SageAttention 2.0.1 (and later one would assume) supports up to 128.
+        sageattn_default_head_sizes = set(range(1, 129))
+
+
+class ComfyModules(NamedTuple):
+    comfy = comfy
+    comfy_extras = comfy_extras
+
+
+_attention_paths = (
+    "comfy.ldm.modules.attention",
+    ####
+    "comfy_extras.nodes_sag",
+    "comfy.ldm.audio.dit",
+    "comfy.ldm.aura.mmdit",
+    "comfy.ldm.cascade.common",
+    "comfy.ldm.flux.math",
+    "comfy.ldm.genmo.join_model.asymm_models_joint",
+    "comfy.ldm.genmo.vae.model",
+    "comfy.ldm.hunyuan_video.model",
+    "comfy.ldm.hydit.attn_layers",
+    "comfy.ldm.hydit.poolers",
+    "comfy.ldm.modules.diffusionmodules.mmdit",
+    "comfy.ldm.pixart.blocks",
+)
+
+
+def get_obj_path(obj, path: str):
+    for pitem in path.split("."):
+        obj = getattr(obj, pitem, None)
+        if obj is None:
+            return None
+    return obj
+
+
+_attention_modules = {
+    path: module
+    for path, module in (
+        (path, get_obj_path(ComfyModules, path)) for path in _attention_paths
+    )
+    if module is not None
+}
+
+orig_attentions = {}
 
 
 def attention_sage(  # noqa: PLR0917
-    q,
-    k,
-    v,
-    heads,
-    mask=None,
-    attn_precision=None,
-    skip_reshape=False,
-    sageattn_allow_head_sizes: set | tuple | list | None = None,
-    sageattn_function=sageattention.sageattn if sageattention is not None else None,
-    sageattn_verbose=False,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    heads: int,
+    mask: torch.Tensor | None = None,
+    attn_precision: torch.dtype | None = None,
+    skip_reshape: bool = False,
+    *,
+    orig_attention,
+    sageattn_allow_head_sizes: collections.abc.Collection
+    | None = sageattn_default_head_sizes,
+    sageattn_function: collections.abc.Callable = sageattn_default_function,
+    sageattn_verbose: bool = False,
     **kwargs: dict[str],
-):
-    if sageattn_allow_head_sizes is None:
-        sageattn_allow_head_sizes = {64, 96, 128}
+) -> torch.Tensor:
     if skip_reshape:
         b, _, _, dim_head = q.shape
     else:
         b, _, dim_head = q.shape
         dim_head //= heads
-    enabled = dim_head in sageattn_allow_head_sizes
+    enabled = sageattn_allow_head_sizes is None or dim_head in sageattn_allow_head_sizes
     if sageattn_verbose:
         print(
-            f"\n>> SAGE({enabled}): reshape={not skip_reshape}, dim_head={dim_head}, heads={heads}, adj_heads={q.shape[-1] // heads}, args: {kwargs}\n",
+            f"\n>> SAGE({enabled}): reshape={not skip_reshape}, dim_head={q.shape[-1]}, heads={heads}, adj_heads={dim_head}, q={q.shape}, k={k.shape}, v={v.shape}, args: {kwargs}\n",
         )
     if not enabled:
         return orig_attention(
@@ -53,6 +120,11 @@ def attention_sage(  # noqa: PLR0917
             attn_precision=attn_precision,
             skip_reshape=skip_reshape,
         )
+    if mask is not None:
+        if mask.ndim == 2:
+            mask = mask[None, None, ...]
+        elif mask.ndim == 3:
+            mask = mask.unsqueeze(1)
     if not skip_reshape:
         if kwargs.get("tensor_layout") != "NHD":
             q, k, v = (
@@ -62,10 +134,10 @@ def attention_sage(  # noqa: PLR0917
         else:
             q, k, v = (t.view(b, -1, heads, dim_head) for t in (q, k, v))
             do_transpose = False
-    sm_scale_hd_key = f"sm_scale_{dim_head}"
-    sm_scale_hd = kwargs.get(sm_scale_hd_key)
+    else:
+        do_transpose = True
+    sm_scale_hd = kwargs.pop(f"sm_scale_{dim_head}", None)
     if sm_scale_hd is not None:
-        del kwargs[sm_scale_hd_key]
         kwargs["sm_scale"] = sm_scale_hd
     result = sageattn_function(
         q,
@@ -81,20 +153,80 @@ def attention_sage(  # noqa: PLR0917
     return result.reshape(b, -1, heads * dim_head)
 
 
-def monkeypatch_attention(enabled: bool, **kwargs: dict[str]):
-    sageattn_function = getattr(
-        sageattention,
-        kwargs.pop("sageattn_function", "sageattn"),
-    )
-    comfy_attention.optimized_attention = (
-        orig_attention
-        if not enabled
-        else partial(
-            attention_sage,
-            sageattn_function=sageattn_function,
+def save_attentions():
+    return {
+        path: (module, fun)
+        for path, module, fun in (
+            (path, module, getattr(module, "optimized_attention", None))
+            for path, module in _attention_modules.items()
+        )
+        if fun is not None
+    }
+
+
+def build_attentions(
+    orig_attentions: dict,
+    *,
+    sageattn_function="sageattn",
+    **kwargs: dict,
+) -> dict:
+    sageattn_function = getattr(sageattention, sageattn_function)
+    return {
+        path: (
+            module,
+            partial(
+                attention_sage,
+                orig_attention=fun,
+                sageattn_function=sageattn_function,
+                **kwargs,
+            ),
+        )
+        for path, (module, fun) in orig_attentions.items()
+    }
+
+
+def monkeypatch_attention(
+    enabled: bool,
+    *,
+    orig_attentions: dict,
+    new_attentions: dict | None = None,
+    **kwargs: dict[str],
+) -> None:
+    if not enabled:
+        new_attentions = orig_attentions
+    elif new_attentions is None:
+        new_attentions = build_attentions(orig_attentions, **kwargs)
+    for module, fun in new_attentions.values():
+        module.optimized_attention = fun
+
+
+@contextlib.contextmanager
+def sageattn_context(
+    enabled: bool,
+    *,
+    orig_attentions: dict | None = None,
+    new_attentions: dict | None = None,
+    **kwargs: dict,
+):
+    if not enabled:
+        yield None
+        return
+    if orig_attentions is None:
+        orig_attentions = save_attentions()
+    elif len(orig_attentions) == 0:
+        orig_attentions.update(save_attentions())
+    if new_attentions == {}:
+        new_attentions.update(build_attentions(orig_attentions, **kwargs))
+    try:
+        monkeypatch_attention(
+            enabled,
+            orig_attentions=orig_attentions,
+            new_attentions=new_attentions,
             **kwargs,
         )
-    )
+        yield None
+    finally:
+        monkeypatch_attention(enabled=False, orig_attentions=orig_attentions)
 
 
 def get_yaml_parameters(yaml_parameters: str | None = None) -> dict:
@@ -111,12 +243,13 @@ def get_yaml_parameters(yaml_parameters: str | None = None) -> dict:
 
 
 class BlehGlobalSageAttention:
+    DESCRIPTION = "Deprecated: Prefer using BlehSageAttentionSampler if possible. This node allows globally replacing ComfyUI's attention with SageAtteniton (performance enhancement). Requires SageAttention to be installed into the ComfyUI Python environment. IMPORTANT: This is not a normal model patch. For settings to apply (including toggling on or off) the node must actually be run. If you toggle it on, run your workflow and then bypass or mute the node this will not actually disable SageAttention."
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "go"
-    CATEGORY = "model_patches"
+    CATEGORY = "hacks"
 
     @classmethod
-    def INPUT_TYPES(cls):
+    def INPUT_TYPES(cls) -> dict:
         return {
             "required": {
                 "model": ("MODEL",),
@@ -139,12 +272,24 @@ class BlehGlobalSageAttention:
         }
 
     @classmethod
-    def go(cls, *, model: object, enabled: bool, yaml_parameters: str | None = None):
+    def go(
+        cls,
+        *,
+        model: object,
+        enabled: bool,
+        yaml_parameters: str | None = None,
+    ) -> tuple:
         if sageattention is None:
             raise RuntimeError(
                 "sageattention not installed to Python environment: SageAttention feature unavailable",
             )
-        monkeypatch_attention(enabled, **get_yaml_parameters(yaml_parameters))
+        if enabled and not orig_attentions:
+            orig_attentions.update(save_attentions())
+        monkeypatch_attention(
+            enabled,
+            orig_attentions=orig_attentions,
+            **get_yaml_parameters(yaml_parameters),
+        )
         return (model,)
 
 
@@ -164,19 +309,19 @@ def sageattn_sampler(
     )
     del ms
 
+    new_attentions = {}
+    backup_attentions = {}
+
     def model_wrapper(x: torch.Tensor, sigma: torch.Tensor, **extra_args: dict[str]):
         sigma_float = float(sigma.max().detach().cpu())
         enabled = end_sigma <= sigma_float <= start_sigma
-        backup_attn = comfy_attention.optimized_attention
-        if enabled:
-            monkeypatch_attention(enabled=True, **sageattn_kwargs)
-        else:
-            comfy_attention.optimized_attention = orig_attention
-        try:
-            result = model(x, sigma, **extra_args)
-        finally:
-            comfy_attention.optimized_attention = backup_attn
-        return result
+        with sageattn_context(
+            enabled=enabled,
+            orig_attentions=backup_attentions,
+            new_attentions=new_attentions,
+            **sageattn_kwargs,
+        ):
+            return model(x, sigma, **extra_args)
 
     for k in (
         "inner_model",
@@ -194,6 +339,7 @@ def sageattn_sampler(
 
 
 class BlehSageAttentionSampler:
+    DESCRIPTION = "Sampler wrapper that enables using SageAttention (performance enhancement) while sampling is in progress. Requires SageAttention to be installed into the ComfyUI Python environment."
     CATEGORY = "sampling/custom_sampling/samplers"
     RETURN_TYPES = ("SAMPLER",)
     FUNCTION = "go"
@@ -242,8 +388,8 @@ class BlehSageAttentionSampler:
         cls,
         sampler: object,
         *,
-        start_percent=0.0,
-        end_percent=1.0,
+        start_percent: float = 0.0,
+        end_percent: float = 1.0,
         yaml_parameters: str | None = None,
     ) -> tuple:
         if sageattention is None:
