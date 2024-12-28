@@ -2,6 +2,11 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20241228
+
+* The SageAttention nodes can now take advantage of SageAttention 2.0.1 which supports head sizes up to 128.
+* Fixed an issue which prevented SageAttention from applying to models like Flux.
+
 ## 20241122
 
 * Added the `BlehGlobalSageAttention` and `BlehSageAttentionSampler` nodes. See the README for details.
