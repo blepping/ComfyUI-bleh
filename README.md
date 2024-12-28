@@ -162,7 +162,13 @@ _Note_: Probably only works with SD 1.x and SDXL. Middle block patching will pro
 
 ### BlehSageAttentionSampler
 
+**Note**: 12/28/2048 - major refactor. Certainly not impossible I broke something with these changes so if you experience issues, please create an issue.
+
 Allows using the SageAttention attention optimization as a sampler wrapper. SageAttention 2.0.1 supports head sizes up to 128 and should have some effect for most models. Earlier SageAttention versions had more limited support and, for example, didn't support any of SD1.5's head sizes. You will probably notice the biggest difference for high resolution generations.
+
+Unfortunately, replacing the attention implementation is a bit tricky and requires special handling for each place it's used. Custom nodes that pull in the optimized attention implementation themselves might not use SageAttention even when enabled. The following custom nodes should work: [sd-perturbed-attention](https://github.com/pamparamm/sd-perturbed-attention), [Fluxtapoz](https://github.com/logtd/ComfyUI-Fluxtapoz)
+
+If you run into custom nodes that don't seem to be honoring SageAttention (you can verify this with `sageattn_verbose: true` in the YAML options), feel free to let me know and I can probably add support.
 
 **Note:** Requires manually installing SageAttention into your Python environment. Should work with SageAttention 1.0 and 2.0.x (2.0.x currently requires CUDA 8+). Link: https://github.com/thu-ml/SageAttention
 

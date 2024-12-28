@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import sys
+import weakref
 from functools import partial
-from typing import TYPE_CHECKING, NamedTuple
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import comfy
 import comfy_extras
@@ -22,6 +25,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     import collections
+    from collections.abc import Callable
 
     import torch
 
@@ -45,11 +49,13 @@ if sageattention is not None:
 class ComfyModules(NamedTuple):
     comfy = comfy
     comfy_extras = comfy_extras
+    custom_nodes = SimpleNamespace()
 
 
 _attention_paths = (
+    # Base attention
     "comfy.ldm.modules.attention",
-    ####
+    # Comfy modules
     "comfy_extras.nodes_sag",
     "comfy.ldm.audio.dit",
     "comfy.ldm.aura.mmdit",
@@ -62,26 +68,57 @@ _attention_paths = (
     "comfy.ldm.hydit.poolers",
     "comfy.ldm.modules.diffusionmodules.mmdit",
     "comfy.ldm.pixart.blocks",
+    # Fluxtapoz custom node
+    "custom_nodes.fluxtapoz.rave_attention",
+    "custom_nodes.fluxtapoz.rave_rope_attention",
+    "custom_nodes.fluxtapoz.flux.layers",
+    "custom_nodes.fluxtapoz.nodes.apply_pag_node",
+    # sd-perturbed-attention custom node
+    "custom_nodes.sd_perturbed_attention.pag_nodes",
 )
 
 
-def get_obj_path(obj, path: str):
-    for pitem in path.split("."):
-        obj = getattr(obj, pitem, None)
-        if obj is None:
-            return None
+def get_obj_path(obj: Any, path: str) -> Any:  # noqa: ANN401
+    try:
+        for pitem in path.split("."):
+            obj = getattr(obj, pitem, None)
+            if obj is None:
+                return None
+    except ReferenceError:
+        return None
     return obj
 
 
-_attention_modules = {
-    path: module
-    for path, module in (
-        (path, get_obj_path(ComfyModules, path)) for path in _attention_paths
-    )
-    if module is not None
-}
+_attention_modules = {}
 
 orig_attentions = {}
+
+_integrations_map = (
+    ("sd_perturbed_attention", "sd-perturbed-attention"),
+    ("fluxtapoz", "ComfyUI-Fluxtapoz"),
+)
+
+
+def build_integrations() -> None:
+    modules = sys.modules.copy()
+    for key, module_name in _integrations_map:
+        module = modules.get(module_name)
+        if module is not None:
+            setattr(ComfyModules.custom_nodes, key, weakref.proxy(module))
+
+
+def build_attention_modules(force: bool = False) -> None:
+    if _attention_modules and not force:
+        return
+    build_integrations()
+    _attention_modules.clear()
+    _attention_modules.update({
+        path: module
+        for path, module in (
+            (path, get_obj_path(ComfyModules, path)) for path in _attention_paths
+        )
+        if module is not None
+    })
 
 
 def attention_sage(  # noqa: PLR0917
@@ -93,7 +130,7 @@ def attention_sage(  # noqa: PLR0917
     attn_precision: torch.dtype | None = None,
     skip_reshape: bool = False,
     *,
-    orig_attention,
+    orig_attention: Callable,
     sageattn_allow_head_sizes: collections.abc.Collection
     | None = sageattn_default_head_sizes,
     sageattn_function: collections.abc.Callable = sageattn_default_function,
@@ -153,7 +190,8 @@ def attention_sage(  # noqa: PLR0917
     return result.reshape(b, -1, heads * dim_head)
 
 
-def save_attentions():
+def save_attentions() -> dict:
+    build_attention_modules()
     return {
         path: (module, fun)
         for path, module, fun in (
@@ -167,9 +205,10 @@ def save_attentions():
 def build_attentions(
     orig_attentions: dict,
     *,
-    sageattn_function="sageattn",
+    sageattn_function: str = "sageattn",
     **kwargs: dict,
 ) -> dict:
+    build_attention_modules()
     sageattn_function = getattr(sageattention, sageattn_function)
     return {
         path: (
@@ -312,7 +351,11 @@ def sageattn_sampler(
     new_attentions = {}
     backup_attentions = {}
 
-    def model_wrapper(x: torch.Tensor, sigma: torch.Tensor, **extra_args: dict[str]):
+    def model_wrapper(
+        x: torch.Tensor,
+        sigma: torch.Tensor,
+        **extra_args: dict[str],
+    ) -> torch.Tensor:
         sigma_float = float(sigma.max().detach().cpu())
         enabled = end_sigma <= sigma_float <= start_sigma
         with sageattn_context(
