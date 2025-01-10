@@ -2,14 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-import sys
-import weakref
-from functools import partial
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING
 
-import comfy
-import comfy_extras
+import comfy.ldm.modules.attention as comfyattn
 import yaml
 from comfy.samplers import KSAMPLER
 
@@ -44,81 +39,6 @@ if sageattention is not None:
     else:
         # SageAttention 2.0.1 (and later one would assume) supports up to 128.
         sageattn_default_head_sizes = set(range(1, 129))
-
-
-class ComfyModules(NamedTuple):
-    comfy = comfy
-    comfy_extras = comfy_extras
-    custom_nodes = SimpleNamespace()
-
-
-_attention_paths = (
-    # Base attention
-    "comfy.ldm.modules.attention",
-    # Comfy modules
-    "comfy_extras.nodes_sag",
-    "comfy.ldm.audio.dit",
-    "comfy.ldm.aura.mmdit",
-    "comfy.ldm.cascade.common",
-    "comfy.ldm.flux.math",
-    "comfy.ldm.genmo.join_model.asymm_models_joint",
-    "comfy.ldm.genmo.vae.model",
-    "comfy.ldm.hunyuan_video.model",
-    "comfy.ldm.hydit.attn_layers",
-    "comfy.ldm.hydit.poolers",
-    "comfy.ldm.modules.diffusionmodules.mmdit",
-    "comfy.ldm.pixart.blocks",
-    # Fluxtapoz custom node
-    "custom_nodes.fluxtapoz.rave_attention",
-    "custom_nodes.fluxtapoz.rave_rope_attention",
-    "custom_nodes.fluxtapoz.flux.layers",
-    "custom_nodes.fluxtapoz.nodes.apply_pag_node",
-    # sd-perturbed-attention custom node
-    "custom_nodes.sd_perturbed_attention.pag_nodes",
-)
-
-
-def get_obj_path(obj: Any, path: str) -> Any:  # noqa: ANN401
-    try:
-        for pitem in path.split("."):
-            obj = getattr(obj, pitem, None)
-            if obj is None:
-                return None
-    except ReferenceError:
-        return None
-    return obj
-
-
-_attention_modules = {}
-
-orig_attentions = {}
-
-_integrations_map = (
-    ("sd_perturbed_attention", "sd-perturbed-attention"),
-    ("fluxtapoz", "ComfyUI-Fluxtapoz"),
-)
-
-
-def build_integrations() -> None:
-    modules = sys.modules.copy()
-    for key, module_name in _integrations_map:
-        module = modules.get(module_name)
-        if module is not None:
-            setattr(ComfyModules.custom_nodes, key, weakref.proxy(module))
-
-
-def build_attention_modules(force: bool = False) -> None:
-    if _attention_modules and not force:
-        return
-    build_integrations()
-    _attention_modules.clear()
-    _attention_modules.update({
-        path: module
-        for path, module in (
-            (path, get_obj_path(ComfyModules, path)) for path in _attention_paths
-        )
-        if module is not None
-    })
 
 
 def attention_sage(  # noqa: PLR0917
@@ -190,82 +110,60 @@ def attention_sage(  # noqa: PLR0917
     return result.reshape(b, -1, heads * dim_head)
 
 
-def save_attentions() -> dict:
-    build_attention_modules()
-    return {
-        path: (module, fun)
-        for path, module, fun in (
-            (path, module, getattr(module, "optimized_attention", None))
-            for path, module in _attention_modules.items()
-        )
-        if fun is not None
-    }
+def copy_funattrs(fun, dest=None):
+    if dest is None:
+
+        def dest():
+            pass
+
+    for k in ("__code__", "__defaults__", "__kwdefaults__"):
+        setattr(dest, k, getattr(fun, k))
+    return dest
 
 
-def build_attentions(
-    orig_attentions: dict,
+def make_sageattn_wrapper(
     *,
+    orig_attn,
     sageattn_function: str = "sageattn",
     **kwargs: dict,
-) -> dict:
-    build_attention_modules()
+):
+    outer_kwargs = kwargs
     sageattn_function = getattr(sageattention, sageattn_function)
-    return {
-        path: (
-            module,
-            partial(
-                attention_sage,
-                orig_attention=fun,
-                sageattn_function=sageattn_function,
-                **kwargs,
-            ),
+
+    def attn(
+        *args: list,
+        _sage_outer_kwargs=outer_kwargs,
+        _sage_orig_attention=orig_attn,
+        _sage_sageattn_function=sageattn_function,
+        _sage_attn=attention_sage,
+        **kwargs: dict,
+    ) -> torch.Tensor:
+        return _sage_attn(
+            *args,
+            orig_attention=_sage_orig_attention,
+            sageattn_function=_sage_sageattn_function,
+            **_sage_outer_kwargs,
+            **kwargs,
         )
-        for path, (module, fun) in orig_attentions.items()
-    }
 
-
-def monkeypatch_attention(
-    enabled: bool,
-    *,
-    orig_attentions: dict,
-    new_attentions: dict | None = None,
-    **kwargs: dict[str],
-) -> None:
-    if not enabled:
-        new_attentions = orig_attentions
-    elif new_attentions is None:
-        new_attentions = build_attentions(orig_attentions, **kwargs)
-    for module, fun in new_attentions.values():
-        module.optimized_attention = fun
+    return attn
 
 
 @contextlib.contextmanager
 def sageattn_context(
     enabled: bool,
-    *,
-    orig_attentions: dict | None = None,
-    new_attentions: dict | None = None,
     **kwargs: dict,
 ):
     if not enabled:
         yield None
         return
-    if orig_attentions is None:
-        orig_attentions = save_attentions()
-    elif len(orig_attentions) == 0:
-        orig_attentions.update(save_attentions())
-    if new_attentions == {}:
-        new_attentions.update(build_attentions(orig_attentions, **kwargs))
+    orig_attn = copy_funattrs(comfyattn.optimized_attention)
+    attn = make_sageattn_wrapper(orig_attn=orig_attn, **kwargs)
     try:
-        monkeypatch_attention(
-            enabled,
-            orig_attentions=orig_attentions,
-            new_attentions=new_attentions,
-            **kwargs,
-        )
+        copy_funattrs(attn, comfyattn.optimized_attention)
         yield None
     finally:
-        monkeypatch_attention(enabled=False, orig_attentions=orig_attentions)
+        copy_funattrs(orig_attn, comfyattn.optimized_attention)
 
 
 def get_yaml_parameters(yaml_parameters: str | None = None) -> dict:
@@ -310,6 +208,8 @@ class BlehGlobalSageAttention:
             },
         }
 
+    orig_attn = None
+
     @classmethod
     def go(
         cls,
@@ -318,17 +218,22 @@ class BlehGlobalSageAttention:
         enabled: bool,
         yaml_parameters: str | None = None,
     ) -> tuple:
+        if not enabled:
+            if cls.orig_attn is not None:
+                copy_funattrs(cls.orig_attn, comfyattn.optimized_attention)
+                cls.orig_attn = None
+            return (model,)
         if sageattention is None:
             raise RuntimeError(
                 "sageattention not installed to Python environment: SageAttention feature unavailable",
             )
-        if enabled and not orig_attentions:
-            orig_attentions.update(save_attentions())
-        monkeypatch_attention(
-            enabled,
-            orig_attentions=orig_attentions,
+        if not cls.orig_attn:
+            cls.orig_attn = copy_funattrs(comfyattn.optimized_attention)
+        attn = make_sageattn_wrapper(
+            orig_attn=cls.orig_attn,
             **get_yaml_parameters(yaml_parameters),
         )
+        copy_funattrs(attn, comfyattn.optimized_attention)
         return (model,)
 
 
@@ -348,9 +253,6 @@ def sageattn_sampler(
     )
     del ms
 
-    new_attentions = {}
-    backup_attentions = {}
-
     def model_wrapper(
         x: torch.Tensor,
         sigma: torch.Tensor,
@@ -360,8 +262,6 @@ def sageattn_sampler(
         enabled = end_sigma <= sigma_float <= start_sigma
         with sageattn_context(
             enabled=enabled,
-            orig_attentions=backup_attentions,
-            new_attentions=new_attentions,
             **sageattn_kwargs,
         ):
             return model(x, sigma, **extra_args)

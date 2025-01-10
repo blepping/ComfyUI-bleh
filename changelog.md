@@ -2,6 +2,10 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20250109
+
+* The strategy the SageAttention nodes use to patch ComfyUI's attention should work for third-party custom nodes more reliably now. Please create an issue if you experience problems.
+
 ## 20241228
 
 * The SageAttention nodes can now take advantage of SageAttention 2.0.1 which supports head sizes up to 128.
