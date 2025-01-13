@@ -29,9 +29,9 @@ if sageattention is not None:
     try:
         sageattn_version = importlib.metadata.version("sageattention")
     except Exception:  # noqa: BLE001
-        sageattn_version = None
+        sageattn_version = "unknown"
     if (
-        sageattn_version is None
+        sageattn_version == "unknown"
         or sageattn_version.startswith("1.")
         or sageattn_version == "2.0.0"
     ):
@@ -39,51 +39,52 @@ if sageattention is not None:
     else:
         # SageAttention 2.0.1 (and later one would assume) supports up to 128.
         sageattn_default_head_sizes = set(range(1, 129))
+else:
+    sageattn_version = "unknown"
 
 
-def attention_sage(  # noqa: PLR0917
+def attention_sage(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     heads: int,
-    mask: torch.Tensor | None = None,
-    attn_precision: torch.dtype | None = None,
-    skip_reshape: bool = False,
     *,
     orig_attention: Callable,
     sageattn_allow_head_sizes: collections.abc.Collection
     | None = sageattn_default_head_sizes,
     sageattn_function: collections.abc.Callable = sageattn_default_function,
+    sageattn_version: str = sageattn_version,
     sageattn_verbose: bool = False,
     **kwargs: dict[str],
 ) -> torch.Tensor:
-    if skip_reshape:
-        b, _, _, dim_head = q.shape
-    else:
-        b, _, dim_head = q.shape
-        dim_head //= heads
+    mask = kwargs.get("mask")
+    skip_reshape = kwargs.get("skip_reshape", False)
+    skip_output_reshape = kwargs.get("skip_output_reshape", False)
+    b = q.shape[0]
+    dim_head = q.shape[-1] // (1 if skip_reshape else heads)
     enabled = sageattn_allow_head_sizes is None or dim_head in sageattn_allow_head_sizes
     if sageattn_verbose:
         print(
-            f"\n>> SAGE({enabled}): reshape={not skip_reshape}, dim_head={q.shape[-1]}, heads={heads}, adj_heads={dim_head}, q={q.shape}, k={k.shape}, v={v.shape}, args: {kwargs}\n",
+            f"\n>> SAGE({enabled}): reshape={not skip_reshape}, output_reshape={not skip_output_reshape}, dim_head={q.shape[-1]}, heads={heads}, adj_heads={dim_head}, q={q.shape}, k={k.shape}, v={v.shape}, args: {kwargs}\n",
         )
     if not enabled:
-        return orig_attention(
-            q,
-            k,
-            v,
-            heads,
-            mask=mask,
-            attn_precision=attn_precision,
-            skip_reshape=skip_reshape,
-        )
+        filtered_kwargs = {
+            k: v
+            for k, v in kwargs.items()
+            if k in {"mask", "skip_reshape", "skip_output_reshape", "attn_precision"}
+        }
+        return orig_attention(q, k, v, heads, **filtered_kwargs)
+    tensor_layout = kwargs.pop("tensor_layout", "NHD")
+    old_sageattn = sageattn_version[:2] in {"1.", "un"}
+    if old_sageattn:
+        tensor_layout = "NHD"
     if mask is not None:
         if mask.ndim == 2:
             mask = mask[None, None, ...]
         elif mask.ndim == 3:
             mask = mask.unsqueeze(1)
     if not skip_reshape:
-        if kwargs.get("tensor_layout") != "NHD":
+        if tensor_layout != "NHD":
             q, k, v = (
                 t.view(b, -1, heads, dim_head).transpose(1, 2) for t in (q, k, v)
             )
@@ -91,8 +92,13 @@ def attention_sage(  # noqa: PLR0917
         else:
             q, k, v = (t.view(b, -1, heads, dim_head) for t in (q, k, v))
             do_transpose = False
+    elif old_sageattn:
+        do_transpose = False
     else:
-        do_transpose = True
+        do_transpose = not skip_output_reshape
+        tensor_layout = "HND"
+    if not old_sageattn:
+        kwargs["tensor_layout"] = tensor_layout
     sm_scale_hd = kwargs.pop(f"sm_scale_{dim_head}", None)
     if sm_scale_hd is not None:
         kwargs["sm_scale"] = sm_scale_hd
@@ -107,16 +113,20 @@ def attention_sage(  # noqa: PLR0917
     )
     if do_transpose:
         result = result.transpose(1, 2)
-    return result.reshape(b, -1, heads * dim_head)
+    if not skip_output_reshape:
+        result = result.reshape(b, -1, heads * dim_head)
+    return result
 
 
 def copy_funattrs(fun, dest=None):
     if dest is None:
-
-        def dest():
-            pass
-
-    for k in ("__code__", "__defaults__", "__kwdefaults__"):
+        dest = fun.__class__(fun.__code__, fun.__globals__)
+    for k in (
+        "__code__",
+        "__defaults__",
+        "__kwdefaults__",
+        "__module__",
+    ):
         setattr(dest, k, getattr(fun, k))
     return dest
 
