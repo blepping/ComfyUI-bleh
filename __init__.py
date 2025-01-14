@@ -33,11 +33,14 @@ NODE_CLASS_MAPPINGS = {
     "BlehInsaneChainSampler": samplers.BlehInsaneChainSampler,
     "BlehLatentOps": ops.BlehLatentOps,
     "BlehLatentScaleBy": ops.BlehLatentScaleBy,
+    "BlehLatentBlend": ops.BlehLatentBlend,
     "BlehModelPatchConditional": modelPatchConditional.ModelPatchConditionalNode,
     "BlehPlug": misc.BlehPlug,
     "BlehRefinerAfter": refinerAfter.BlehRefinerAfter,
     "BlehSageAttentionSampler": sageAttention.BlehSageAttentionSampler,
     "BlehSetSamplerPreset": samplers.BlehSetSamplerPreset,
+    "BlehCast": misc.BlehCast,
+    "BlehSetSigmas": misc.BlehSetSigmas,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

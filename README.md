@@ -231,6 +231,21 @@ Like the builtin `LatentScaleBy` node, however it allows setting the horizontal 
 as well as allowing providing an extended list of scaling options. Can also be useful for testing what different types of scaling or
 enhancement effects look like.
 
+### BlehLatentBlend
+
+Allows blending latents using any of the blending modes available.
+
+### BlehCast
+
+Advanced node: Allows tricking ComfyUI into thinking a value of one type is a different type. This does not actually convert anything, just lets you connect things that otherwise couldn't be connected. In other words, don't do it unless you know the actual object is compatible with the input.
+
+### BlehSetSigmas
+
+Advanced sigma manipulation node which can be used to insert sigmas into other sigmas, adjust them, replace them or
+just manually enter a list of sigmas. Note: Experimental, not well tested.
+
+***
+
 ## Scaling Types
 
 * bicubic: Generally the safe option.

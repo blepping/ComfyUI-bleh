@@ -21,7 +21,7 @@ with contextlib.suppress(Exception):
         BLEH_PRESET_LIMIT,
         max(
             0,
-            int(environ.get("COMFYUI_BLEH_SAMPLER_PRESET_COUNT", 1)),
+            int(environ.get("COMFYUI_BLEH_SAMPLER_PRESET_COUNT", "1")),
         ),
     )
 

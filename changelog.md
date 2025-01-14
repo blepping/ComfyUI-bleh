@@ -2,6 +2,13 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20250114
+
+* Added `BlehLatentBlend` node.
+* Added `BlehCast` node that lets crazy people connect things that shouldn't be connected.
+* Added `BlehSetSigmas` node.
+* Some BlockOps functions have expanded capabilities now.
+
 ## 20250109
 
 * The strategy the SageAttention nodes use to patch ComfyUI's attention should work for third-party custom nodes more reliably now. Please create an issue if you experience problems.

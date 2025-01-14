@@ -63,7 +63,7 @@ class CompareType(Enum):
 
 
 class OpType(Enum):
-    # scale, strength, blend, blend mode, use hidden mean
+    # scale, strength, blend, blend mode, use hidden mean, dim, scale offset
     SLICE = auto()
 
     # scale, filter, filter strength, threshold
@@ -102,7 +102,7 @@ class OpType(Enum):
     # blend strength, blend_mode, [op]
     BLEND_OP = auto()
 
-    # scale mode, antialias size, mask example, [op]
+    # scale mode, antialias size, mask example, [op], blend_mode
     MASK_EXAMPLE_OP = auto()
 
     # size
@@ -134,6 +134,8 @@ OP_DEFAULTS = {
         blend=1.0,
         blend_mode="bislerp",
         use_hidden_mean=True,
+        dim=1,
+        scale_offset=0,
     ),
     OpType.FFILTER: OrderedDict(
         scale=1.0,
@@ -179,6 +181,7 @@ OP_DEFAULTS = {
             (0.5, 0.25, (16, 0.0), 0.25, 0.5),
         ),
         ops=(),
+        blend_mode="lerp",
     ),
     OpType.ANTIALIAS: OrderedDict(size=7),
     OpType.NOISE: OrderedDict(scale=0.5, type="gaussian", scale_mode="sigdiff"),
@@ -368,16 +371,26 @@ class SubOpsOperation(Operation):
 class OpSlice(Operation):
     def op(self, t, _state):
         out = t
-        scale, strength, blend, mode, use_hm = self.args
-        slice_size = round(t.shape[1] * scale)
-        sliced = t[:, :slice_size]
+        scale, strength, blend, mode, use_hm, dim, scale_offset = self.args
+        if dim < 0:
+            dim = t.ndim + dim
+        dim_size = t.shape[dim]
+        slice_size = max(1, round(dim_size * scale))
+        slice_offset = int(dim_size * scale_offset)
+        slice_def = tuple(
+            slice(None, None)
+            if idx != dim
+            else slice(slice_offset, slice_offset + slice_size)
+            for idx in range(dim + 1)
+        )
+        sliced = t[slice_def]
         if use_hm:
-            result = sliced * ((strength - 1) * hidden_mean(t) + 1)
+            result = sliced * ((strength - 1) * hidden_mean(t)[slice_def] + 1)
         else:
             result = sliced * strength
         if blend != 1:
             result = BLENDING_MODES[mode](sliced, result, blend)
-        out[:, :slice_size] = result
+        out[slice_def] = result
         return out
 
 
@@ -457,10 +470,14 @@ class OpUnscale(OpScale):
 
 class OpFlip(Operation):
     def op(self, t, _state):
-        return torch.flip(
-            t,
-            dims=(2 if self.args[0] in {"v", "vertical"} else 3,),
-        )
+        dimarg = self.args[0]
+        if isinstance(dimarg, str):
+            dim = dimarg[:1] == "v"
+        elif isinstance(dimarg, int):
+            dim = (dimarg,)
+        else:
+            dim = dimarg
+        return torch.flip(t, dims=dim)
 
 
 class OpRot90(Operation):
@@ -535,7 +552,10 @@ class OpMaskExampleOp(SubOpsOperation):
 
     def __init__(self, *args: list, **kwargs: dict):
         super().__init__(*args, **kwargs)
-        scale_mode, antialias_size, maskdef, subops = self.args
+        scale_mode, antialias_size, maskdef, subops, blend_mode = self.args
+        blend_function = BLENDING_MODES.get(blend_mode)
+        if blend_function is None:
+            raise ValueError("Bad blend mode")
         mask = []
         for rowidx in range(len(maskdef)):
             repeats = 1
@@ -551,10 +571,16 @@ class OpMaskExampleOp(SubOpsOperation):
                     row.append(col)
             mask += (row,) * repeats
         mask = torch.tensor(mask, dtype=torch.float32, device="cpu")
-        self.args = (scale_mode, antialias_size, mask, subops)
+        self.args = (
+            scale_mode,
+            antialias_size,
+            mask,
+            subops,
+            blend_function,
+        )
 
     def op(self, t, state):
-        scale_mode, antialias_size, mask, subops = self.args
+        scale_mode, antialias_size, mask, subops, blend_function = self.args
         mask = scale_samples(
             mask.view(1, 1, *mask.shape).to(t.device, dtype=t.dtype),
             t.shape[-1],
@@ -570,8 +596,7 @@ class OpMaskExampleOp(SubOpsOperation):
             state["target"] = tempname
             subop.eval(state)
         state["target"] = old_target
-        out = state[tempname] * mask
-        out += t * (1 - mask)
+        out = blend_function(t, state[tempname], mask)
         del state[tempname]
         return out
 
@@ -748,6 +773,8 @@ class RuleGroup:
     @classmethod
     def from_yaml(cls, s: str) -> object:
         parsed_rules = yaml.safe_load(s)
+        if parsed_rules is None:
+            return cls(())
         return cls(tuple(r for rs in parsed_rules for r in Rule.from_dict(rs)))
 
     def __init__(self, rules):
@@ -786,7 +813,7 @@ class BlehBlockOps:
         cls,
         model,
         rules: str,
-        sigmas_opt: None | torch.Tensor = None,
+        sigmas_opt: torch.Tensor | None = None,
     ):
         rules = rules.strip()
         if len(rules) == 0:
@@ -980,8 +1007,8 @@ class BlehLatentScaleBy:
             stensor,
             width,
             height,
-            method_horizontal,
-            method_vertical,
+            mode=method_horizontal,
+            mode_h=method_vertical,
             antialias_size=antialias_size,
         )
         return (samples,)
@@ -995,6 +1022,9 @@ class BlehLatentOps:
                 "samples": ("LATENT",),
                 "rules": ("STRING", {"multiline": True, "dynamicPrompts": False}),
             },
+            "optional": {
+                "samples_hsp": ("LATENT",),
+            },
         }
 
     RETURN_TYPES = ("LATENT",)
@@ -1005,8 +1035,10 @@ class BlehLatentOps:
     @classmethod
     def go(
         cls,
-        samples,
+        *,
+        samples: dict,
         rules: str,
+        samples_hsp: dict | None = None,
     ):
         samples = samples.copy()
         rules = rules.strip()
@@ -1020,9 +1052,39 @@ class BlehLatentOps:
             CondType.BLOCK: -1,
             CondType.STAGE: -1,
             "h": stensor,
-            "hsp": None,
+            "hsp": None if samples_hsp is None else samples_hsp["samples"],
             "target": "h",
         }
         rules.eval(state, toplevel=True)
-        samples["samples"] = state["h"]
-        return (samples,)
+        return ({"samples": state["h"]},)
+
+
+class BlehLatentBlend:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "samples1": ("LATENT",),
+                "samples2": ("LATENT",),
+                "samples2_percent": ("FLOAT", {"default": 0.5}),
+                "blend_mode": (tuple(BLENDING_MODES.keys()),),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "go"
+
+    CATEGORY = "latent"
+
+    @classmethod
+    def go(
+        cls,
+        *,
+        samples1: dict,
+        samples2: dict,
+        samples2_percent=0.5,
+        blend_mode="lerp",
+    ):
+        a, b = samples1["samples"], samples2["samples"]
+        blend_function = BLENDING_MODES[blend_mode]
+        return ({"samples": blend_function(a, b, samples2_percent)},)
