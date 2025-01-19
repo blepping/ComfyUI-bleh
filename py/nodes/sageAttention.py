@@ -57,12 +57,15 @@ def attention_sage(
     sageattn_verbose: bool = False,
     **kwargs: dict[str],
 ) -> torch.Tensor:
+    old_sageattn = sageattn_version[:2] in {"1.", "un"}
     mask = kwargs.get("mask")
     skip_reshape = kwargs.get("skip_reshape", False)
     skip_output_reshape = kwargs.get("skip_output_reshape", False)
-    b = q.shape[0]
+    batch = q.shape[0]
     dim_head = q.shape[-1] // (1 if skip_reshape else heads)
     enabled = sageattn_allow_head_sizes is None or dim_head in sageattn_allow_head_sizes
+    if enabled and old_sageattn:
+        enabled = all(t.shape == q.shape for t in (k, v))
     if sageattn_verbose:
         print(
             f"\n>> SAGE({enabled}): reshape={not skip_reshape}, output_reshape={not skip_output_reshape}, dim_head={q.shape[-1]}, heads={heads}, adj_heads={dim_head}, q={q.shape}, k={k.shape}, v={v.shape}, args: {kwargs}\n",
@@ -74,29 +77,33 @@ def attention_sage(
             if k in {"mask", "skip_reshape", "skip_output_reshape", "attn_precision"}
         }
         return orig_attention(q, k, v, heads, **filtered_kwargs)
-    tensor_layout = kwargs.pop("tensor_layout", "NHD")
-    old_sageattn = sageattn_version[:2] in {"1.", "un"}
+    tensor_layout = kwargs.pop("tensor_layout", None)
     if old_sageattn:
-        tensor_layout = "NHD"
+        tensor_layout = "HND"
+    elif tensor_layout is None:
+        tensor_layout = "HND" if skip_reshape else "NHD"
+    tensor_layout = tensor_layout.strip().upper()
+    if tensor_layout not in {"NHD", "HND"}:
+        raise ValueError("Bad tensor_layout, must be one of NHD, HND")
     if mask is not None:
         if mask.ndim == 2:
             mask = mask[None, None, ...]
         elif mask.ndim == 3:
             mask = mask.unsqueeze(1)
     if not skip_reshape:
-        if tensor_layout != "NHD":
+        if tensor_layout == "HND":
             q, k, v = (
-                t.view(b, -1, heads, dim_head).transpose(1, 2) for t in (q, k, v)
+                t.view(batch, -1, heads, dim_head).transpose(1, 2) for t in (q, k, v)
             )
             do_transpose = True
         else:
-            q, k, v = (t.view(b, -1, heads, dim_head) for t in (q, k, v))
+            q, k, v = (t.view(batch, -1, heads, dim_head) for t in (q, k, v))
             do_transpose = False
-    elif old_sageattn:
-        do_transpose = False
     else:
         do_transpose = not skip_output_reshape
-        tensor_layout = "HND"
+        if not old_sageattn and tensor_layout == "NHD":
+            q, k, v = (t.transpose(1, 2) for t in (q, k, v))
+            do_transpose = skip_output_reshape
     if not old_sageattn:
         kwargs["tensor_layout"] = tensor_layout
     sm_scale_hd = kwargs.pop(f"sm_scale_{dim_head}", None)
@@ -114,7 +121,7 @@ def attention_sage(
     if do_transpose:
         result = result.transpose(1, 2)
     if not skip_output_reshape:
-        result = result.reshape(b, -1, heads * dim_head)
+        result = result.reshape(batch, -1, heads * dim_head)
     return result
 
 
