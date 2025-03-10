@@ -191,7 +191,7 @@ def get_yaml_parameters(yaml_parameters: str | None = None) -> dict:
         return {}
     if not isinstance(extra_params, dict):
         raise ValueError(  # noqa: TRY004
-            "DiffuseHighSampler: yaml_parameters must either be null or an object",
+            "BlehSageAttention: yaml_parameters must either be null or an object",
         )
     return extra_params
 
