@@ -7,6 +7,9 @@
     "throttle_secs": 1,
     "maxed_batch_step_mode": false,
     "preview_device": null,
-    "skip_upscale_layers": 0
+    "skip_upscale_layers": 0,
+    "compile_previewer": false,
+    "oom_fallback": "latent2rgb",
+    "oom_retry": true
   }
 }

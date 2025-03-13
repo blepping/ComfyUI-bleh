@@ -31,3 +31,20 @@ betterTaesdPreviews:
     # Allows skipping upscale layers in the TAESD model, may increase performance when previewing large images or batches.
     # May be set to -1 (conservative) or -2 (aggressive) to automatically calculate how many to skip. See README.md for details.
     skip_upscale_layers: 0
+
+    # Controls whether the previewer model is compiled (using torch.compile). Only works if your
+    # Torch version and GPU support compiling. This also may cause a delay/memory spike on decoding the first preview.
+    # This may be a boolean or object with arguments to pass to torch.compile. For example:
+    #   compile_previewer:
+    #     mode: max-autotune
+    #     backend: inductor
+    compile_previewer: false
+
+    # Controls behavior if we run out of memory trying to decode the preview.
+    # Possible values: none, latent2rgb
+    oom_fallback: "latent2rgb"
+
+    # When enabled, we will try to use the normal previewer on each call
+    # and only use the fallback if the normal previewer fails.
+    # When disabled, we use the fallback starting from the first OOM.
+    oom_retry: true

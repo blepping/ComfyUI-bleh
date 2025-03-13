@@ -20,6 +20,9 @@ class Settings:
             self.btp_skip_upscale_layers = btp.get("skip_upscale_layers", 0)
             self.btp_preview_device = btp.get("preview_device")
             self.btp_maxed_batch_step_mode = btp.get("maxed_batch_step_mode", False)
+            self.btp_compile_previewer = btp.get("compile_previewer", False)
+            self.btp_oom_fallback = btp.get("oom_fallback", "latent2rgb")
+            self.btp_oom_retry = btp.get("oom_retry", True)
 
     @staticmethod
     def get_cfg_path(filename) -> Path:

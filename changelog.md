@@ -2,6 +2,11 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20250313
+
+* Added OOM fallback to the previewer.
+* Added ability to compile the previewer (and a few other related options).
+
 ## 20250119
 
 * Fixed SageAttention 1.x support and setting `tensor_layout` should work properly for SageAttention 2.x now. Please create an issue if you experience problems.
