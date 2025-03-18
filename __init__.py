@@ -4,9 +4,6 @@ BLEH_VERSION = 1
 
 settings.load_settings()
 
-if settings.SETTINGS.btp_enabled:
-    from .py import betterTaesdPreview  # noqa: F401
-
 from .py.nodes import (
     blockCFG,
     deepShrink,
@@ -41,6 +38,7 @@ NODE_CLASS_MAPPINGS = {
     "BlehSetSamplerPreset": samplers.BlehSetSamplerPreset,
     "BlehCast": misc.BlehCast,
     "BlehSetSigmas": misc.BlehSetSigmas,
+    "BlehEnsurePreviwer": misc.BlehEnsurePreviewer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

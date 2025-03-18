@@ -1,15 +1,26 @@
+from __future__ import annotations
+
 import math
 from time import time
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
+import folder_paths
 import latent_preview
 import torch
-from comfy.latent_formats import LatentFormat
+from comfy.cli_args import LatentPreviewMethod
+from comfy.cli_args import args as comfy_args
 from comfy.model_management import device_supports_non_blocking
+from comfy.taesd.taesd import TAESD
 from PIL import Image
 from tqdm import tqdm
 
-from .settings import SETTINGS
+from ..settings import SETTINGS  # noqa: TID252
+from .tae_vid import TAEVid
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from comfy import latent_formats
 
 _ORIG_PREVIEWER = latent_preview.TAESDPreviewerImpl
 _ORIG_GET_PREVIEWER = latent_preview.get_previewer
@@ -17,11 +28,25 @@ _ORIG_GET_PREVIEWER = latent_preview.get_previewer
 LAST_LATENT_FORMAT = None
 
 
+class VideoModelInfo(NamedTuple):
+    fps: int = 24
+    temporal_compression: int = 8
+    tae_model: str | Path | None = None
+
+
+VIDEO_FORMATS = {
+    "mochi": VideoModelInfo(temporal_compression=6),
+    "hunyuanvideo": VideoModelInfo(temporal_compression=4),
+    "cosmos1cv8x8x8": VideoModelInfo(),
+    "wan21": VideoModelInfo(fps=16, temporal_compression=4, tae_model="taew2_1.pth"),
+}
+
+
 class FallbackPreviewerModel(torch.nn.Module):
     @torch.no_grad()
     def __init__(
         self,
-        latent_format: LatentFormat,
+        latent_format: latent_formats.LatentFormat,
         *,
         dtype: torch.dtype,
         device: torch.device,
@@ -58,18 +83,29 @@ class FallbackPreviewerModel(torch.nn.Module):
         return x.add_(1.0).mul_(127.5).clamp_(0.0, 255.0)
 
 
-class BetterTAESDPreviewer(_ORIG_PREVIEWER):
-    def __init__(self, taesd):
-        del taesd.taesd_encoder
-        self.latent_format = LAST_LATENT_FORMAT
+class BetterPreviewer(_ORIG_PREVIEWER):
+    def __init__(
+        self,
+        *,
+        taesd: torch.nn.Module | None = None,
+        latent_format: latent_formats.LatentFormat,
+        vid_info: VideoModelInfo | None = None,
+    ):
+        self.latent_format = latent_format
+        self.vid_info = vid_info
         self.fallback_previewer_model = None
         self.device = (
             None
             if SETTINGS.btp_preview_device is None
             else torch.device(SETTINGS.btp_preview_device)
         )
-        if self.device and self.device != next(taesd.parameters()).device:
-            taesd = taesd.to(self.device)
+        if taesd is not None:
+            if hasattr(taesd, "taesd_encoder"):
+                del taesd.taesd_encoder
+            if hasattr(taesd, "encoder"):
+                del taesd.encoder
+            if self.device and self.device != next(taesd.parameters()).device:
+                taesd = taesd.to(self.device)
         self.taesd = taesd
         self.stamp = None
         self.cached = None
@@ -97,7 +133,7 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
     # Popping upscale layers trick from https://github.com/madebyollin/
     def maybe_pop_upscale_layers(self, *, width=None, height=None) -> None:
         skip = self.skip_upscale_layers
-        if skip == 0:
+        if skip == 0 or not isinstance(self.taesd, TAESD):
             return
         upscale_layers = tuple(
             idx
@@ -153,19 +189,28 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
         self.stamp = now
         return False
 
-    def prepare_decode_latent(self, x0: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+    def calculate_indexes(self, batch_size: int) -> range:
         max_batch = self.max_batch_preview
-        batch = x0.shape[0]
         if not self.maxed_batch_step_mode:
-            indexes = range(min(max_batch, batch))
-        else:
-            indexes = range(
-                0,
-                batch,
-                math.ceil(batch / max_batch),
-            )[:max_batch]
-        x0 = x0[indexes, :]
-        batch, (height, width) = x0.shape[0], x0.shape[-2:]
+            return range(min(max_batch, batch_size))
+        return range(
+            0,
+            batch_size,
+            math.ceil(batch_size / max_batch),
+        )[:max_batch]
+
+    def prepare_decode_latent(
+        self,
+        x0: torch.Tensor,
+        *,
+        frames_to_batch=True,
+    ) -> tuple[torch.Tensor, int, int]:
+        if frames_to_batch and x0.ndim == 5:
+            x0 = x0.transpose(2, 1).reshape(-1, x0.shape[1], *x0.shape[-2:])
+        batch = x0.shape[0]
+        x0 = x0[self.calculate_indexes(batch), :]
+        batch = x0.shape[0]
+        height, width = x0.shape[-2:]
         if self.device and x0.device != self.device:
             x0 = x0.to(
                 device=self.device,
@@ -178,8 +223,34 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
         )
         return x0, cols, rows
 
-    def _decode_latent(self, x0: torch.Tensor) -> tuple[torch.Tensor, int, int]:
-        x0, cols, rows = self.prepare_decode_latent(x0)
+    def _decode_latent_taevid(self, x0: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+        height, width = x0.shape[-2:]
+        if self.device and x0.device != self.device:
+            x0 = x0.to(
+                device=self.device,
+                non_blocking=device_supports_non_blocking(x0.device),
+            )
+        decoded = self.taesd.decode(x0.transpose(1, 2)).movedim(2, -1)
+        del x0
+        decoded = decoded.reshape(-1, *decoded.shape[2:])
+        batch = decoded.shape[0]
+        decoded = decoded[self.calculate_indexes(batch), :]
+        cols, rows = self.calc_cols_rows(
+            min(batch, self.max_batch_preview),
+            width,
+            height,
+        )
+        return (
+            decoded.mul_(255.0).round_().clamp_(min=0, max=255.0).detach(),
+            cols,
+            rows,
+        )
+
+    def _decode_latent_taesd(self, x0: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+        x0, cols, rows = self.prepare_decode_latent(
+            x0,
+            frames_to_batch=not isinstance(self.taesd, TAEVid),
+        )
         height, width = x0.shape[-2:]
         if self.skip_upscale_layers < 0:
             self.maybe_pop_upscale_layers(
@@ -259,14 +330,14 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
         if not quiet:
             fallback_mode = "using fallback" if self.oom_fallback else "skipping"
             tqdm.write(
-                f"*** BlehBetterTAESDPreviews: Got out of memory error while decoding preview - {fallback_mode}.",
+                f"*** BlehBetterPreviews: Got out of memory error while decoding preview - {fallback_mode}.",
             )
         if not self.oom_fallback:
             return self.blank
         if not self.init_fallback_previewer(x0.device, x0.dtype):
             self.oom_fallback = False
             tqdm.write(
-                "*** BlehBetterTAESDPreviews: Couldn't initialize fallback previewer, giving up on previews.",
+                "*** BlehBetterPreviews: Couldn't initialize fallback previewer, giving up on previews.",
             )
             return self.blank
         x0, cols, rows = self.prepare_decode_latent(x0)
@@ -284,29 +355,81 @@ class BetterTAESDPreviewer(_ORIG_PREVIEWER):
             return self.cached
         if x0.shape[0] == 0:
             return self.blank  # Shouldn't actually be possible.
-        if self.oom_count and not self.oom_retry:
+        if (self.oom_count and not self.oom_retry) or self.taesd is None:
             return self.fallback_previewer(x0, quiet=True)
         try:
-            return self.decoded_to_image(*self._decode_latent(x0))
+            if isinstance(self.taesd, TAEVid):
+                return self.decoded_to_image(*self._decode_latent_taevid(x0))
+            return self.decoded_to_image(*self._decode_latent_taesd(x0))
         except torch.OutOfMemoryError:
             return self.fallback_previewer(x0)
 
 
-def bleh_get_previewer_wrapper(
+def bleh_get_previewer(
     device,
-    latent_format: LatentFormat,
+    latent_format: latent_formats.LatentFormat,
     *args: list,
     **kwargs: dict,
-):
-    global LAST_LATENT_FORMAT  # noqa: PLW0603
-    LAST_LATENT_FORMAT = latent_format
+) -> object | None:
+    preview_method = comfy_args.preview_method
+    format_name = latent_format.__class__.__name__.lower()
+    if (
+        not SETTINGS.btp_enabled
+        or format_name in SETTINGS.btp_blacklist
+        or (SETTINGS.btp_whitelist and format_name not in SETTINGS.btp_whitelist)
+    ):
+        return _ORIG_GET_PREVIEWER(device, latent_format, *args, **kwargs)
+    tae_model = None
+    if preview_method in {LatentPreviewMethod.TAESD, LatentPreviewMethod.Auto}:
+        vid_info = VIDEO_FORMATS.get(format_name)
+        if vid_info is not None and vid_info.tae_model is not None:
+            tae_model_path = folder_paths.get_full_path(
+                "vae_approx",
+                vid_info.tae_model,
+            )
+            tae_model = (
+                TAEVid(
+                    checkpoint_path=tae_model_path,
+                    latent_channels=latent_format.latent_channels,
+                    device=device,
+                    decoder_time_upscale=(False, False, True),
+                ).to(device)
+                if tae_model_path is not None
+                else None
+            )
+        if tae_model is None and latent_format.taesd_decoder_name is not None:
+            taesd_path = folder_paths.get_full_path(
+                "vae_approx",
+                f"{latent_format.taesd_decoder_name}.pth",
+            )
+            tae_model = (
+                TAESD(
+                    None,
+                    taesd_path,
+                    latent_channels=latent_format.latent_channels,
+                ).to(device)
+                if taesd_path is not None
+                else None
+            )
+        return BetterPreviewer(
+            taesd=tae_model,
+            latent_format=latent_format,
+            vid_info=vid_info,
+        )
+    if (
+        preview_method == LatentPreviewMethod.NoPreviews
+        or latent_format.latent_rgb_factors is None
+    ):
+        return None
+    if preview_method == LatentPreviewMethod.Latent2RGB:
+        return BetterPreviewer(latent_format=latent_format)
     return _ORIG_GET_PREVIEWER(device, latent_format, *args, **kwargs)
 
 
-if not isinstance(latent_preview.TAESDPreviewerImpl, BetterTAESDPreviewer):
-    latent_preview.BLEH_ORIG_TAESDPreviewerImpl = _ORIG_PREVIEWER
-    latent_preview.TAESDPreviewerImpl = BetterTAESDPreviewer
+def ensure_previewer():
+    if latent_preview.get_previewer != bleh_get_previewer:
+        latent_preview.BLEH_ORIG_get_previewer = _ORIG_GET_PREVIEWER
+        latent_preview.get_previewer = bleh_get_previewer
 
-if latent_preview.get_previewer != bleh_get_previewer_wrapper:
-    latent_preview.BLEH_ORIG_get_previewer = _ORIG_GET_PREVIEWER
-    latent_preview.get_previewer = bleh_get_previewer_wrapper
+
+ensure_previewer()

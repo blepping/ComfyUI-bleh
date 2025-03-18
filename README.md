@@ -303,3 +303,5 @@ Also may be an item from [Filters](#filters).
 ## Credits
 
 Latent blending and scaling and filter functions based on implementation from https://github.com/WASasquatch/FreeU_Advanced - thanks!
+
+TAE video model support based on code https://github.com/madebyollin/taehv/.

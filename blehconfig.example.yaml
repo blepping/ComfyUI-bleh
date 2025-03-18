@@ -48,3 +48,15 @@ betterTaesdPreviews:
     # and only use the fallback if the normal previewer fails.
     # When disabled, we use the fallback starting from the first OOM.
     oom_retry: true
+
+    # List of lowercase latent format names from https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/latent_formats.py
+    # If the list is empty, this disables the whitelist. Otherwise, Bleh will
+    # only handle previewing for formats in the list.
+    whitelist_formats: []
+
+    # List of lowercase latent format names (see above).
+    # Bleh will delegate to the normal previewer for any latent formats in the blacklist.
+    blacklist_formats: []
+
+    # Controls whether video previewing uses parallel mode (faster, requires more memory).
+    video_parallel: true
