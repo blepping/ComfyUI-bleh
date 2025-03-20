@@ -14,6 +14,7 @@ from .py.nodes import (
     refinerAfter,
     sageAttention,
     samplers,
+    taevid,
 )
 
 samplers.add_sampler_presets()
@@ -39,6 +40,8 @@ NODE_CLASS_MAPPINGS = {
     "BlehCast": misc.BlehCast,
     "BlehSetSigmas": misc.BlehSetSigmas,
     "BlehEnsurePreviwer": misc.BlehEnsurePreviewer,
+    "BlehTAEVideoDecode": taevid.TAEVideoDecode,
+    "BlehTAEVideoEncode": taevid.TAEVideoEncode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

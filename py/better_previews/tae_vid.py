@@ -158,7 +158,7 @@ class TAEVidContext:
         for xt_new in handler(i, xt, b):
             self.work_queue.insert(0, TWorkItem(xt_new, i + 1))
 
-    def apply(self, x: torch.Tensor, *, show_progress_bar=False) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, *, show_progress=False) -> torch.Tensor:
         if x.ndim != 5:
             raise ValueError("Expected 5 dimensional tensor")
         self.reset(x)
@@ -167,7 +167,7 @@ class TAEVidContext:
         model = self.model
         model_len = len(model)
 
-        with tqdm(range(self.T), disable=not show_progress_bar) as pbar:
+        with tqdm(range(self.T), disable=not show_progress) as pbar:
             while work_queue:
                 xt, i = work_queue.pop(0)
                 if i == model_len:
@@ -269,13 +269,13 @@ class TAEVid(nn.Module):
         x: torch.Tensor,
         model: nn.Module,
         *,
-        show_progress_bar=False,
+        show_progress=False,
     ) -> torch.Tensor:
         padding = (0, 0, 0, 0, 0, 0, 1, 0)
         n, t, c, h, w = x.shape
         x = x.reshape(n * t, c, h, w)
         # parallel over input timesteps, iterate over blocks
-        for b in tqdm(model, disable=not show_progress_bar):
+        for b in tqdm(model, disable=not show_progress):
             if not isinstance(b, MemBlock):
                 x = b(x)
                 continue
@@ -290,12 +290,24 @@ class TAEVid(nn.Module):
         t = nt // n
         return x.view(n, t, c, h, w)
 
-    def decode(self, x: torch.Tensor, *, parallel=True) -> torch.Tensor:
+    def apply(
+        self,
+        x: torch.Tensor,
+        *,
+        decode=True,
+        parallel=True,
+        show_progress=False,
+    ) -> torch.Tensor:
+        model = self.decoder if decode else self.encoder
         if parallel:
-            result = self.apply_parallel(x, self.decoder)
-        else:
-            result = TAEVidContext(self.decoder).apply(x)
-        return result[:, self.frames_to_trim :]
+            return self.apply_parallel(x, model, show_progress=show_progress)
+        return TAEVidContext(model).apply(x, show_progress=show_progress)
+
+    def decode(self, *args: list, **kwargs: dict) -> torch.Tensor:
+        return self.apply(*args, decode=True, **kwargs)[:, self.frames_to_trim :]
+
+    def encode(self, *args: list, **kwargs: dict) -> torch.Tensor:
+        return self.apply(*args, decode=False, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.c(x)

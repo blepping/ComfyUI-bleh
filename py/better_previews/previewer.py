@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import folder_paths
 import latent_preview
 import torch
+from comfy import latent_formats
 from comfy.cli_args import LatentPreviewMethod
 from comfy.cli_args import args as comfy_args
 from comfy.model_management import device_supports_non_blocking
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import numpy as np
-    from comfy import latent_formats
 
 _ORIG_PREVIEWER = latent_preview.TAESDPreviewerImpl
 _ORIG_GET_PREVIEWER = latent_preview.get_previewer
@@ -30,16 +30,30 @@ LAST_LATENT_FORMAT = None
 
 
 class VideoModelInfo(NamedTuple):
+    latent_format: latent_formats.LatentFormat
     fps: int = 24
     temporal_compression: int = 8
     tae_model: str | Path | None = None
 
 
 VIDEO_FORMATS = {
-    "mochi": VideoModelInfo(temporal_compression=6, tae_model="taem1.pth"),
-    "hunyuanvideo": VideoModelInfo(temporal_compression=4, tae_model="taehv.pth"),
-    "cosmos1cv8x8x8": VideoModelInfo(),
-    "wan21": VideoModelInfo(fps=16, temporal_compression=4, tae_model="taew2_1.pth"),
+    "mochi": VideoModelInfo(
+        latent_formats.Mochi,
+        temporal_compression=6,
+        tae_model="taem1.pth",
+    ),
+    "hunyuanvideo": VideoModelInfo(
+        latent_formats.HunyuanVideo,
+        temporal_compression=4,
+        tae_model="taehv.pth",
+    ),
+    "cosmos1cv8x8x8": VideoModelInfo(latent_formats.Cosmos1CV8x8x8),
+    "wan21": VideoModelInfo(
+        latent_formats.Wan21,
+        fps=16,
+        temporal_compression=4,
+        tae_model="taew2_1.pth",
+    ),
 }
 
 
@@ -417,15 +431,23 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         if (self.oom_count and not self.oom_retry) or self.taesd is None:
             return self.fallback_previewer(x0, quiet=True)
         is_video = x0.ndim == 5
+        used_fallback = False
+        start_time = time()
         try:
             dargs = (
                 self._decode_latent_taevid(x0)
                 if is_video
                 else self._decode_latent_taesd(x0)
             )
-            return self.decoded_to_image(*dargs, is_video=is_video)
+            result = self.decoded_to_image(*dargs, is_video=is_video)
         except torch.OutOfMemoryError:
-            return self.fallback_previewer(x0)
+            used_fallback = True
+            result = self.fallback_previewer(x0)
+        if SETTINGS.btp_verbose:
+            tqdm.write(
+                f"BlehPreview: used fallback: {used_fallback}, decode time: {time() - start_time:0.2f}",
+            )
+        return result
 
 
 def bleh_get_previewer(

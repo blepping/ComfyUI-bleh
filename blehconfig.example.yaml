@@ -59,7 +59,7 @@ betterTaesdPreviews:
     blacklist_formats: []
 
     # Controls whether video previewing uses parallel mode (faster, requires more memory).
-    video_parallel: true
+    video_parallel: false
 
     # Maximum frames to include in a preview. -1 means no limit.
     # Frame limiting is treated like batch limiting so maxed_batch_step mode, etc will apply here.

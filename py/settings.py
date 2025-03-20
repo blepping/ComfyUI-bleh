@@ -24,13 +24,14 @@ class Settings:
         self.btp_oom_retry = btp.get("oom_retry", True)
         self.btp_whitelist = frozenset(btp.get("whitelist_formats", frozenset()))
         self.btp_blacklist = frozenset(btp.get("blacklist_formats", frozenset()))
-        self.btp_video_parallel = btp.get("video_parallel", True)
+        self.btp_video_parallel = btp.get("video_parallel", False)
         self.btp_video_max_frames = btp.get("video_max_frames", -1)
         self.btp_video_temporal_upscale_level = btp.get(
             "video_temporal_upscale_level",
-            2,
+            0,
         )
         self.btp_animate_preview = btp.get("animate_preview", "none")
+        self.btp_verbose = btp.get("verbose", False)
 
     @staticmethod
     def get_cfg_path(filename) -> Path:
