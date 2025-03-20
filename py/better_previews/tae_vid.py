@@ -182,6 +182,9 @@ class TAEVidContext:
 
 
 class TAEVid(nn.Module):
+    temporal_upscale_blocks = 2
+    spatial_upscale_blocks = 3
+
     def __init__(
         self,
         *,

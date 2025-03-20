@@ -269,9 +269,14 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         del x0
         decoded = decoded.reshape(-1, *decoded.shape[2:])
         batch = decoded.shape[0]
-        decoded = decoded[self.calculate_indexes(batch), :]
+        decoded = decoded[self.calculate_indexes(batch, is_video=True), :]
         cols, rows = self.calc_cols_rows(
-            min(batch, self.max_batch_preview),
+            min(
+                batch,
+                SETTINGS.btp_video_max_frames
+                if SETTINGS.btp_video_max_frames >= 0
+                else batch,
+            ),
             width,
             height,
         )
@@ -445,12 +450,16 @@ def bleh_get_previewer(
                 "vae_approx",
                 vid_info.tae_model,
             )
+            tupscale_limit = SETTINGS.btp_video_temporal_upscale_level
+            decoder_time_upscale = tuple(
+                i < tupscale_limit for i in range(TAEVid.temporal_upscale_blocks)
+            )
             tae_model = (
                 TAEVid(
                     checkpoint_path=tae_model_path,
                     latent_channels=latent_format.latent_channels,
                     device=device,
-                    decoder_time_upscale=(False, False),
+                    decoder_time_upscale=decoder_time_upscale,
                 ).to(device)
                 if tae_model_path is not None
                 else None

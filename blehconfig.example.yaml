@@ -65,6 +65,10 @@ betterTaesdPreviews:
     # Frame limiting is treated like batch limiting so maxed_batch_step mode, etc will apply here.
     video_max_frames: -1
 
+    # Number of temporal upscale blocks to run. 2 is the maximum and will fully decode
+    # the latent into image frames.
+    video_temporal_upscale_level: 0
+
     # One of: video, batch, both, none
     # Probably will only work if you set the preview type to webp.
     # When active, rows/columns are ignored and batch items or video frames will be
