@@ -20,6 +20,7 @@ from .tae_vid import TAEVid
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import numpy as np
     from comfy import latent_formats
 
 _ORIG_PREVIEWER = latent_preview.TAESDPreviewerImpl
@@ -35,11 +36,37 @@ class VideoModelInfo(NamedTuple):
 
 
 VIDEO_FORMATS = {
-    "mochi": VideoModelInfo(temporal_compression=6),
-    "hunyuanvideo": VideoModelInfo(temporal_compression=4),
+    "mochi": VideoModelInfo(temporal_compression=6, tae_model="taem1.pth"),
+    "hunyuanvideo": VideoModelInfo(temporal_compression=4, tae_model="taehv.pth"),
     "cosmos1cv8x8x8": VideoModelInfo(),
     "wan21": VideoModelInfo(fps=16, temporal_compression=4, tae_model="taew2_1.pth"),
 }
+
+
+class ImageWrapper:
+    def __init__(self, frames: tuple, frame_duration: int):
+        self._frames = frames
+        self._frame_duration = frame_duration
+
+    def save(self, fp, format: str | None, **kwargs: dict):  # noqa: A002
+        if len(self._frames) == 1:
+            return self._frames[0].save(fp, format, **kwargs)
+        kwargs |= {
+            "loop": 0,
+            "save_all": True,
+            "append_images": self._frames[1:],
+            "duration": self._frame_duration,
+        }
+        return self._frames[0].save(fp, "webp", **kwargs)
+
+    def resize(self, *args: list, **kwargs: dict) -> ImageWrapper:
+        return ImageWrapper(
+            tuple(frame.resize(*args, **kwargs) for frame in self._frames),
+            frame_duration=self._frame_duration,
+        )
+
+    def __getattr__(self, key):
+        return getattr(self._frames[0], key)
 
 
 class FallbackPreviewerModel(torch.nn.Module):
@@ -172,7 +199,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
     ) -> tuple[str, Image, int]:
         preview_image = self.decode_latent_to_preview(x0)
         return (
-            preview_format,
+            preview_format if not isinstance(preview_image, ImageWrapper) else "WEBP",
             preview_image,
             min(
                 max(*preview_image.size),
@@ -189,8 +216,12 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         self.stamp = now
         return False
 
-    def calculate_indexes(self, batch_size: int) -> range:
-        max_batch = self.max_batch_preview
+    def calculate_indexes(self, batch_size: int, *, is_video=False) -> range:
+        max_batch = (
+            SETTINGS.btp_video_max_frames if is_video else self.max_batch_preview
+        )
+        if max_batch < 0:
+            return range(batch_size)
         if not self.maxed_batch_step_mode:
             return range(min(max_batch, batch_size))
         return range(
@@ -205,10 +236,11 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         *,
         frames_to_batch=True,
     ) -> tuple[torch.Tensor, int, int]:
-        if frames_to_batch and x0.ndim == 5:
+        is_video = x0.ndim == 5
+        if frames_to_batch and is_video:
             x0 = x0.transpose(2, 1).reshape(-1, x0.shape[1], *x0.shape[-2:])
         batch = x0.shape[0]
-        x0 = x0[self.calculate_indexes(batch), :]
+        x0 = x0[self.calculate_indexes(batch, is_video=is_video), :]
         batch = x0.shape[0]
         height, width = x0.shape[-2:]
         if self.device and x0.device != self.device:
@@ -230,7 +262,10 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 device=self.device,
                 non_blocking=device_supports_non_blocking(x0.device),
             )
-        decoded = self.taesd.decode(x0.transpose(1, 2)).movedim(2, -1)
+        decoded = self.taesd.decode(
+            x0.transpose(1, 2),
+            parallel=SETTINGS.btp_video_parallel,
+        ).movedim(2, -1)
         del x0
         decoded = decoded.reshape(-1, *decoded.shape[2:])
         batch = decoded.shape[0]
@@ -289,7 +324,22 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         rows = math.ceil(batch_size / cols)
         return cols, rows
 
-    def decoded_to_image(self, samples: torch.Tensor, cols: int, rows: int) -> Image:
+    @classmethod
+    def decoded_to_animation(cls, samples: np.ndarray) -> ImageWrapper:
+        batch = samples.shape[0]
+        return ImageWrapper(
+            tuple(Image.fromarray(samples[idx]) for idx in range(batch)),
+            frame_duration=250,
+        )
+
+    def decoded_to_image(
+        self,
+        samples: torch.Tensor,
+        cols: int,
+        rows: int,
+        *,
+        is_video=False,
+    ) -> Image | ImageWrapper:
         batch, (height, width) = samples.shape[0], samples.shape[-3:-1]
         samples = samples.to(
             device="cpu",
@@ -299,8 +349,12 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         if batch == 1:
             self.cached = Image.fromarray(samples[0])
             return self.cached
+        if SETTINGS.btp_animate_preview == "both" or (
+            is_video,
+            SETTINGS.btp_animate_preview,
+        ) in {(True, "video"), (False, "batch")}:
+            return self.decoded_to_animation(samples)
         cols, rows = self.calc_cols_rows(batch, width, height)
-
         img_size = (width * cols, height * rows)
         if self.cached is not None and self.cached.size == img_size:
             result = self.cached
@@ -357,10 +411,14 @@ class BetterPreviewer(_ORIG_PREVIEWER):
             return self.blank  # Shouldn't actually be possible.
         if (self.oom_count and not self.oom_retry) or self.taesd is None:
             return self.fallback_previewer(x0, quiet=True)
+        is_video = x0.ndim == 5
         try:
-            if isinstance(self.taesd, TAEVid):
-                return self.decoded_to_image(*self._decode_latent_taevid(x0))
-            return self.decoded_to_image(*self._decode_latent_taesd(x0))
+            dargs = (
+                self._decode_latent_taevid(x0)
+                if is_video
+                else self._decode_latent_taesd(x0)
+            )
+            return self.decoded_to_image(*dargs, is_video=is_video)
         except torch.OutOfMemoryError:
             return self.fallback_previewer(x0)
 
@@ -392,7 +450,7 @@ def bleh_get_previewer(
                     checkpoint_path=tae_model_path,
                     latent_channels=latent_format.latent_channels,
                     device=device,
-                    decoder_time_upscale=(False, False, True),
+                    decoder_time_upscale=(False, False),
                 ).to(device)
                 if tae_model_path is not None
                 else None

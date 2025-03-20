@@ -25,6 +25,8 @@ class Settings:
         self.btp_whitelist = frozenset(btp.get("whitelist_formats", frozenset()))
         self.btp_blacklist = frozenset(btp.get("blacklist_formats", frozenset()))
         self.btp_video_parallel = btp.get("video_parallel", True)
+        self.btp_video_max_frames = btp.get("video_max_frames", -1)
+        self.btp_animate_preview = btp.get("animate_preview", "none")
 
     @staticmethod
     def get_cfg_path(filename) -> Path:

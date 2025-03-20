@@ -60,3 +60,14 @@ betterTaesdPreviews:
 
     # Controls whether video previewing uses parallel mode (faster, requires more memory).
     video_parallel: true
+
+    # Maximum frames to include in a preview. -1 means no limit.
+    # Frame limiting is treated like batch limiting so maxed_batch_step mode, etc will apply here.
+    video_max_frames: -1
+
+    # One of: video, batch, both, none
+    # Probably will only work if you set the preview type to webp.
+    # When active, rows/columns are ignored and batch items or video frames will be
+    # produced as an animated WEBP.
+    # NOTE: Does not work correctly yet.
+    animate_preview: none
