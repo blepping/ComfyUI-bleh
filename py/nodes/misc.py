@@ -7,7 +7,7 @@ from decimal import Decimal
 import torch
 from comfy import model_management
 
-from ..better_previews import ensure_previewer  # noqa: TID252
+from ..better_previews.previewer import ensure_previewer  # noqa: TID252
 
 
 class DiscardPenultimateSigma:

@@ -224,13 +224,12 @@ class Compare:
             self.value = (self.value,)
 
     def test(self, state: dict) -> bool:
-        match self.typ:
-            case CompareType.NOT:
-                return all(not v.test(state) for v in self.value)
-            case CompareType.AND:
-                return all(v.test(state) for v in self.value)
-            case CompareType.OR:
-                return any(v.test(state) for v in self.value)
+        if self.typ == CompareType.NOT:
+            return all(not v.test(state) for v in self.value)
+        if self.typ == CompareType.AND:
+            return all(v.test(state) for v in self.value)
+        if self.typ == CompareType.OR:
+            return any(v.test(state) for v in self.value)
         opfn, fieldval = self.opfn, state[self.field]
         return all(opfn(fieldval, val) for val in self.value)
 
@@ -251,26 +250,25 @@ class Condition:
             self.value = Compare(value[0], value[1:])
 
     def test(self, state: dict) -> bool:
-        match self.typ:
-            case CondType.FROM_PERCENT:
-                pct = state[CondType.PERCENT]
-                result = all(pct >= v for v in self.value)
-            case CondType.TO_PERCENT:
-                pct = state[CondType.PERCENT]
-                result = all(pct <= v for v in self.value)
-            case CondType.FROM_STEP:
-                step = state[CondType.STEP]
-                result = step > 0 and all(step >= v for v in self.value)
-            case CondType.TO_STEP:
-                step = state[CondType.STEP]
-                result = step > 0 and all(step <= v for v in self.value)
-            case CondType.STEP_INTERVAL:
-                step = state[CondType.STEP]
-                result = step > 0 and all(step % v == 0 for v in self.value)
-            case CondType.COND:
-                result = self.value.test(state)
-            case _:
-                result = state[self.typ] in self.value
+        if self.typ == CondType.FROM_PERCENT:
+            pct = state[CondType.PERCENT]
+            result = all(pct >= v for v in self.value)
+        elif self.typ == CondType.TO_PERCENT:
+            pct = state[CondType.PERCENT]
+            result = all(pct <= v for v in self.value)
+        elif self.typ == CondType.FROM_STEP:
+            step = state[CondType.STEP]
+            result = step > 0 and all(step >= v for v in self.value)
+        elif self.typ == CondType.TO_STEP:
+            step = state[CondType.STEP]
+            result = step > 0 and all(step <= v for v in self.value)
+        elif self.typ == CondType.STEP_INTERVAL:
+            step = state[CondType.STEP]
+            result = step > 0 and all(step % v == 0 for v in self.value)
+        elif self.typ == CondType.COND:
+            result = self.value.test(state)
+        else:
+            result = state[self.typ] in self.value
         return result
 
     def __repr__(self) -> str:
@@ -494,15 +492,14 @@ class OpRoll(Operation):
     def op(self, t, _state):
         dims, amount = self.args
         if isinstance(dims, str):
-            match dims:
-                case "h" | "horizontal":
-                    dims = (3,)
-                case "v" | "vertical":
-                    dims = (2,)
-                case "c" | "channels":
-                    dims = (1,)
-                case _:
-                    raise ValueError("Bad roll direction")
+            if dims in {"h", "horizontal"}:
+                dims = (3,)
+            elif dims in {"v", "vertical"}:
+                dims = (2,)
+            elif dims in {"c", "channels"}:
+                dims = (1,)
+            else:
+                raise ValueError("Bad roll direction")
         elif isinstance(dims, int):
             dims = (dims,)
         if isinstance(amount, float) and amount < 1.0 and amount > -1.0:
@@ -609,16 +606,15 @@ class OpAntialias(Operation):
 class OpNoise(Operation):
     def op(self, t, state):
         scale, noise_type, scale_mode = self.args
-        match scale_mode:
-            case "sigma":
+        if scale_mode == "sigma":
+            step_scale = state.get("sigma", 1.0)
+        elif scale_mode == "sigdiff":
+            if "sigma" in state and "sigma_next" in state:
+                step_scale = state["sigma"] - state["sigma_next"]
+            else:
                 step_scale = state.get("sigma", 1.0)
-            case "sigdiff":
-                if "sigma" in state and "sigma_next" in state:
-                    step_scale = state["sigma"] - state["sigma_next"]
-                else:
-                    step_scale = state.get("sigma", 1.0)
-            case _:
-                step_scale = 1.0
+        else:
+            step_scale = 1.0
         noise_sampler = get_noise_sampler(
             noise_type,
             t,

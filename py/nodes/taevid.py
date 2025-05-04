@@ -1,10 +1,12 @@
+# ruff: noqa: TID252
+
 import torch  # noqa: I001
 
 import folder_paths
 from comfy import model_management
 
-from ..better_previews.previewer import VIDEO_FORMATS  # noqa: TID252
-from ..better_previews.tae_vid import TAEVid  # noqa: TID252
+from ..better_previews.previewer import VIDEO_FORMATS, VideoModelInfo
+from ..better_previews.tae_vid import TAEVid
 
 
 class TAEVideoNodeBase:
@@ -30,7 +32,7 @@ class TAEVideoNodeBase:
     def get_taevid_model(
         cls,
         latent_type: str,
-    ) -> tuple[TAEVid, torch.device, torch.dtype]:
+    ) -> tuple[TAEVid, torch.device, torch.dtype, VideoModelInfo]:
         vmi = VIDEO_FORMATS.get(latent_type)
         if vmi is None or vmi.tae_model is None:
             raise ValueError("Bad latent type")
@@ -54,11 +56,12 @@ class TAEVideoNodeBase:
             ).to(device),
             device,
             dtype,
+            vmi,
         )
 
     @classmethod
     def go(cls, *, latent, latent_type: str, parallel_mode: bool) -> tuple:
-        pass
+        raise NotImplementedError
 
 
 class TAEVideoDecode(TAEVideoNodeBase):
@@ -76,8 +79,9 @@ class TAEVideoDecode(TAEVideoNodeBase):
 
     @classmethod
     def go(cls, *, latent: dict, latent_type: str, parallel_mode: bool) -> tuple:
-        model, device, dtype = cls.get_taevid_model(latent_type)
+        model, device, dtype, vmi = cls.get_taevid_model(latent_type)
         samples = latent["samples"].detach().to(device=device, dtype=dtype, copy=True)
+        samples = vmi.latent_format().process_in(samples)
         img = (
             model.decode(
                 samples.transpose(1, 2),
@@ -109,17 +113,18 @@ class TAEVideoEncode(TAEVideoNodeBase):
 
     @classmethod
     def go(cls, *, image: torch.Tensor, latent_type: str, parallel_mode: bool) -> tuple:
-        model, device, dtype = cls.get_taevid_model(latent_type)
+        model, device, dtype, vmi = cls.get_taevid_model(latent_type)
         image = image.detach().to(device=device, dtype=dtype, copy=True)
         if image.ndim == 4:
             image = image.unsqueeze(0)
+        latent = model.encode(
+            image.movedim(-1, 2),
+            parallel=parallel_mode,
+            show_progress=True,
+        ).transpose(1, 2)
         latent = (
-            model.encode(
-                image.movedim(-1, 2),
-                parallel=parallel_mode,
-                show_progress=True,
-            )
-            .transpose(1, 2)
+            vmi.latent_format()
+            .process_out(latent)
             .to(
                 dtype=torch.float,
                 device="cpu",

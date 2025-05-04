@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import math
 import os
+from functools import partial
 
 import kornia.filters as kf
 import numpy as np
 import torch
+import torch.nn.functional as nnf
 from torch import FloatTensor, LongTensor, fft
 
 OVERRIDE_NO_SCALE = "COMFYUI_BLEH_OVERRIDE_NO_SCALE" in os.environ
@@ -87,15 +89,20 @@ def hslerp_alt(a, b, t):
 
 
 # This should be more correct but the results are worse. :(
-def hslerp_alt_(a, b, t):
+def hslerp_alt2(a, b, t, *, sign_order=(1.0, -1.0), sign_threshold=0.5):
     if a.shape != b.shape:
         raise ValueError("Input tensors a and b must have the same shape.")
     t_expanded = t.broadcast_to(a.shape[-2:])
     while t_expanded.ndim < a.ndim:
         t_expanded = t_expanded.unsqueeze(0)
-    interp = torch.where(t_expanded < 0.5, 1.0, -1.0)
-    result = (1 - t) * a + t * b
-    return result.add_((torch.norm(b - a, dim=1, keepdim=True) / 6) * interp)
+    return (
+        ((1 - t) * a)
+        .add_(t * b)
+        .add_(
+            torch.norm(b - a, dim=1, keepdim=True).div_(6)
+            * torch.where(t_expanded.abs() < sign_threshold, *sign_order),
+        )
+    )
 
 
 # Copied from ComfyUI
@@ -189,25 +196,236 @@ def altslerp(  # noqa: PLR0914
     return out
 
 
+# def prob_blend_(a, b, t, *, cpu=False):
+#     if not isinstance(t, torch.Tensor):
+#         t = torch.tensor((t,), dtype=a.dtype, device=a.device)
+#     tmin, tmax = t.aminmax()
+#     tmin, tmax = min(tmin, 0.0), max(tmax, 1.0)
+#     t = t - tmin
+#     tdiv = tmax - tmin
+#     if tdiv != 0:
+#         t /= tdiv
+#     t = t.broadcast_to(a.shape)
+#     probs = torch.rand(
+#         *a.shape,
+#         dtype=a.dtype,
+#         layout=a.layout,
+#         device="cpu" if cpu else a.device,
+#     )
+#     if probs.device != a.device:
+#         probs = probs.to(a.device)
+#     return torch.where(probs > t, a, b)
+
+
+def stochasistic_blend(
+    a,
+    b,
+    t,
+    *,
+    cpu=False,
+    fuzz=0.1,
+    clamp_t: bool | tuple = True,
+    blend=torch.lerp,
+):
+    if not isinstance(t, torch.Tensor):
+        t = torch.tensor((t,), dtype=a.dtype, device=a.device)
+    t_orig = t
+    t = t.broadcast_to(a.shape)
+    tadj = torch.rand(
+        *t.shape,
+        dtype=a.dtype,
+        layout=a.layout,
+        device="cpu" if cpu else a.device,
+    )
+    if tadj.device != a.device:
+        tadj = tadj.to(a.device)
+    tadj = tadj.mul_(fuzz * 2).sub_(fuzz)
+    tadj += t
+    if isinstance(clamp_t, tuple):
+        tadj = tadj.clamp_(*clamp_t)
+    elif clamp_t:
+        tmin, tmax = t_orig.aminmax()
+        tadj = tadj.clamp_(min(0, tmin), max(1.0, tmax))
+    return blend(a, b, tadj)
+
+
+def prob_blend(a, b, t, *, cpu=False):
+    t_device = torch.device("cpu") if cpu else a.device
+    if not isinstance(t, torch.Tensor):
+        t = torch.tensor((t,), dtype=a.dtype, device=t_device)
+    elif t.device != t_device:
+        t = t.detach().clone().to(t_device)
+    tmin, tmax = t.aminmax()
+    tmin, tmax = min(tmin, 0.0), max(tmax, 1.0)
+    t = t - tmin  # noqa: PLR6104
+    tdiv = tmax - tmin
+    if tdiv != 0:
+        t /= tdiv
+    t = t.clamp_(0, 1).broadcast_to(a.shape)
+    return torch.where(torch.bernoulli(t).to(device=a.device, dtype=torch.bool), b, a)
+
+
+def gaussian_smoothing(
+    t: torch.Tensor,
+    kernel_size,
+    sigma: float | tuple | list,
+) -> torch.Tensor:
+    if not isinstance(kernel_size, (list, tuple)):
+        kernel_size = (kernel_size,)
+    if not isinstance(sigma, (list, tuple)):
+        sigma = (sigma,)
+    ndim = t.ndim
+    ts = t.shape
+    if ndim == 1:
+        gk = kf.kernels.gaussian(
+            kernel_size[0],
+            torch.tensor(sigma, dtype=t.dtype, device=t.device),
+            device=t.device,
+            dtype=t.dtype,
+        )[None, None, ...]
+        return nnf.conv2d(
+            t[None, None, None, ...],
+            gk,
+            padding=(0, gk.numel() // 2),
+        ).view(t.numel())
+    if ndim == 2:
+        t = t[None, None, ...]
+    elif ndim == 3:
+        t = t[None, ...]
+    elif ndim == 5:
+        t = t.reshape(ts[0], ts[1] * ts[2], *ts[3:])
+    elif ndim != 4:
+        raise ValueError("Can't handle tensor shape")
+    if len(kernel_size) == 1:
+        kernel_size = kernel_size * 2  # noqa: PLR6104
+    if len(sigma) == 1:
+        sigma = sigma * 2  # noqa: PLR6104
+    result = kf.gaussian_blur2d(t, kernel_size, sigma)
+    if ndim == 5:
+        return result.reshape(*ts)
+    while result.ndim > ndim and result.shape[0] == 1:
+        result = result.squeeze(0)
+    return result
+
+
+def prob_blend_smoothed(
+    a,
+    b,
+    t,
+    *,
+    cpu: bool = False,
+    blend=torch.lerp,
+    kernel_size: int | tuple | list = 3,
+    sigma: float | tuple | list = 1.0,
+):
+    t_device = torch.device("cpu") if cpu else a.device
+    if not isinstance(t, torch.Tensor):
+        t = torch.tensor((t,), dtype=a.dtype, device=t_device)
+    elif t.device != t_device:
+        t = t.detach().clone().to(t_device)
+    tmin, tmax = t.aminmax()
+    tmin, tmax = min(tmin, 0.0), max(tmax, 1.0)
+    t = t - tmin  # noqa: PLR6104
+    tdiv = tmax - tmin
+    if tdiv != 0:
+        t /= tdiv
+    t = t.clamp_(0, 1).broadcast_to(a.shape)
+    t = torch.bernoulli(t).to(device=a.device, dtype=a.dtype)
+    t = gaussian_smoothing(t, kernel_size, sigma)
+    return blend(a, b, t)
+
+
+# Originally referenced from https://github.com/54rt1n/ComfyUI-DareMerge
+# Doesn't handle non-scalar t very well.
+def gradient_blend_(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    dim=-1,
+    scaling_constant=0.9,
+    blend_function=torch.lerp,
+) -> torch.Tensor:
+    dim = max(0, min(a.ndim - 1, a.ndim + dim if dim < 0 else dim))
+    if not isinstance(t, torch.Tensor):
+        t = a.new_full((1,), t)
+    if t.ndim > 0 and t.numel() > 1:
+        t = t.broadcast_to(a.shape).mean(dim=dim, keepdim=True)
+    count = a.shape[dim]
+    peak_idx = int(count * (1 - t))
+    ratios = a.new_zeros(count)
+    torch.arange(peak_idx, out=ratios[:peak_idx]).div_(peak_idx)
+    torch.arange(count - peak_idx - 1, -1, -1, out=ratios[peak_idx:]).div_(
+        count - peak_idx,
+    )
+    if scaling_constant != 1:
+        ratios *= scaling_constant
+    ratios = ratios.view(tuple(1 if i != dim else -1 for i in range(a.ndim)))
+    return blend_function(a, b, ratios)
+
+
+def gradient_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    flatten_start_dim=1,
+    scaling_constant=0.9,
+    blend_function=torch.lerp,
+) -> torch.Tensor:
+    shape = a.shape
+    # print("\nBLEND:", t)
+    if isinstance(t, torch.Tensor) and t.ndim > 0 and t.numel() > 1:
+        t = t.mean()
+    if a.ndim > 2:
+        a = a.flatten(start_dim=flatten_start_dim)
+        b = b.flatten(start_dim=flatten_start_dim)
+    count = a.shape[-1]
+    peak_idx = int(count * (1 - t))
+    ratios = a.new_zeros(count)
+    torch.arange(peak_idx, out=ratios[:peak_idx]).div_(peak_idx)
+    torch.arange(count - peak_idx - 1, -1, -1, out=ratios[peak_idx:]).div_(
+        count - peak_idx,
+    )
+    if scaling_constant != 1:
+        ratios *= scaling_constant
+    result = blend_function(a, b, ratios)
+    if result.shape != shape:
+        return result.reshape(*shape).contiguous()
+    return result
+
+
 class BlendMode:
-    __slots__ = ("allow_scale", "f", "norm", "norm_dims", "rev")
+    __slots__ = (
+        "allow_scale",
+        "f",
+        "force_rescale",
+        "norm",
+        "norm_dims",
+        "rescale_dims",
+        "rev",
+    )
 
     class _Empty:
         pass
 
-    def __init__(
+    def __init__(  # noqa: PLR0917
         self,
         f,
         norm=None,
         norm_dims=(-3, -2, -1),
         rev=False,
         allow_scale=True,
+        rescale_dims=(-3, -2, -1),
+        force_rescale=False,
     ):
         self.f = f
         self.norm = norm
         self.norm_dims = norm_dims
         self.rev = rev
         self.allow_scale = allow_scale
+        self.rescale_dims = rescale_dims
+        self.force_rescale = force_rescale
 
     def edited(
         self,
@@ -217,6 +435,8 @@ class BlendMode:
         norm_dims=_Empty,
         rev=_Empty,
         allow_scale=_Empty,
+        rescale_dims=_Empty,
+        force_rescale=_Empty,
     ):
         empty = self._Empty
         return self.__class__(
@@ -225,15 +445,49 @@ class BlendMode:
             norm_dims=norm_dims if norm_dims is not empty else self.norm_dims,
             rev=rev if rev is not empty else self.rev,
             allow_scale=allow_scale if allow_scale is not empty else self.allow_scale,
+            rescale_dims=rescale_dims
+            if rescale_dims is not empty
+            else self.rescale_dims,
+            force_rescale=force_rescale
+            if force_rescale is not empty
+            else self.force_rescale,
         )
 
-    def __call__(self, a, b, t):
+    def rescale(self, t, *, rescale_dims=_Empty):
+        if t.ndim > 2:
+            rescale_dims = (
+                self.rescale_dims if rescale_dims is self._Empty else rescale_dims
+            )
+        else:
+            # Meh.
+            rescale_dims = -1
+        tmin = torch.amin(t, keepdim=True, dim=rescale_dims)
+        tmax = torch.amax(t, keepdim=True, dim=rescale_dims)
+        return (t - tmin).div_(tmax - tmin).clamp_(0, 1), tmin, tmax
+
+    def __call__(self, a, b, t, *, norm_dims=_Empty):
+        if not self.force_rescale:
+            return self.__call__internal(a, b, t, norm_dims=norm_dims)
+        a, amin, amax = self.rescale(a)
+        b, bmin, bmax = self.rescale(b)
+        result = self.__call__internal(a, b, t, norm_dims=norm_dims)
+        del a, b
+        rmin, rmax = torch.lerp(amin, bmin, 0.5), torch.lerp(amax, bmax, 0.5)
+        del amin, amax, bmin, bmax
+        return result.mul_(rmax.sub_(rmin)).add_(rmin)
+
+    def __call__internal(self, a, b, t, *, norm_dims=_Empty):
+        if not isinstance(t, torch.Tensor) and isinstance(a, torch.Tensor):
+            t = a.new_full((1,), t)
         if self.rev:
             a, b = b, a
         if self.norm is None:
             return self.f(a, b, t)
-        ref = (1 - t) * a + t * b
-        return self.norm(self.f(a, b, t), reference_latent=ref, dim=self.norm_dims)
+        return self.norm(
+            self.f(a, b, t),
+            reference_latent=torch.lerp(a, b, t),
+            dim=self.norm_dims if norm_dims is self._Empty else norm_dims,
+        )
 
 
 BLENDING_MODES = {
@@ -242,38 +496,82 @@ BLENDING_MODES = {
     #   - b (tensor): Latent input 2
     #   - t (float): Blending factor
     # Interpolates between tensors a and b using normalized linear interpolation.
-    "bislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b),
+    "bislerp": BlendMode(
+        lambda a, b, t: ((1 - t) * a).add_(t * b),
+        normalize,
+    ),
     # "nbislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b, normalize),
-    "slerp": BlendMode(lambda a, b, t: altslerp(a, b, t, dim=0)),
+    "slerp": BlendMode(lambda a, b, t: altslerp(a, b, t, dim=-1)),
     # Transfer the color from `b` to `a` by t` factor
-    "colorize": BlendMode(lambda a, b, t: a + (b - a) * t),
+    "colorize": BlendMode(lambda a, b, t: (b - a).mul_(t).add_(a)),
     # Interpolates between tensors a and b using cosine interpolation.
     "cosinterp": BlendMode(
-        lambda a, b, t: (a + b - (a - b) * torch.cos(t * torch.tensor(math.pi))) / 2,
+        lambda a, b, t: (
+            (a + b).sub_((a - b).mul_(torch.cos(t * torch.tensor(math.pi))))
+        ).div_(2),
     ),
     # Interpolates between tensors a and b using cubic interpolation.
-    "cuberp": BlendMode(lambda a, b, t: a + (b - a) * (3 * t**2 - 2 * t**3)),
+    "cuberp": BlendMode(lambda a, b, t: (b - a).mul_(3 * t**2 - 2 * t**3).add_(a)),
     # Interpolates between tensors a and b using normalized linear interpolation,
     # with a twist when t is greater than or equal to 0.5.
     "hslerp": BlendMode(hslerp),
+    "hslerpalt": BlendMode(hslerp_alt2),
+    "hslerpalt110x": BlendMode(partial(hslerp_alt2, sign_order=(1.1, -1.1))),
+    "hslerpalt125x": BlendMode(partial(hslerp_alt2, sign_order=(1.25, -1.25))),
+    "hslerpalt150x": BlendMode(partial(hslerp_alt2, sign_order=(1.5, -1.5))),
+    "hslerpalt300x": BlendMode(partial(hslerp_alt2, sign_order=(3.0, -3.0))),
+    "hslerpaltflipsign": BlendMode(partial(hslerp_alt2, sign_order=(-1.0, 1.0))),
+    "hslerpaltflipsign110x": BlendMode(partial(hslerp_alt2, sign_order=(-1.1, 1.1))),
+    "hslerpaltflipsign125x": BlendMode(partial(hslerp_alt2, sign_order=(-1.25, 1.25))),
+    "hslerpaltflipsign150x": BlendMode(partial(hslerp_alt2, sign_order=(-1.5, 1.5))),
+    "hslerpaltflipsign300x": BlendMode(partial(hslerp_alt2, sign_order=(-3.0, 3.0))),
+    "problerp0.25": BlendMode(partial(stochasistic_blend, fuzz=0.25)),
+    "problerp0.1": BlendMode(partial(stochasistic_blend, fuzz=0.1)),
+    "problerp0.025": BlendMode(partial(stochasistic_blend, fuzz=0.025)),
+    "probselect": BlendMode(prob_blend),
+    "probselectsmoothed": BlendMode(prob_blend_smoothed),
+    "probselectsmoothed_ks5": BlendMode(partial(prob_blend_smoothed, kernel_size=5)),
+    "probselectsmoothed_ks9": BlendMode(partial(prob_blend_smoothed, kernel_size=9)),
+    "probselectsmoothed_ks9_sigma3": BlendMode(
+        partial(
+            prob_blend_smoothed,
+            kernel_size=9,
+            sigma=3.0,
+        ),
+    ),
+    "gradient": BlendMode(gradient_blend),
     # Adds tensor b to tensor a, scaled by t.
-    "inject": BlendMode(lambda a, b, t: a + b * t),
+    "inject": BlendMode(lambda a, b, t: (b * t).add_(a)),
+    "injecthalf": BlendMode(lambda a, b, t: (b * (t * 0.5)).add_(a)),
+    "injectquarter": BlendMode(lambda a, b, t: (b * (t * 0.25)).add_(a)),
     # Interpolates between tensors a and b using linear interpolation.
-    "lerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b),
+    "lerp": BlendMode(lambda a, b, t: ((1 - t) * a).add_(t * b)),
+    "lerp050x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.5)),
+    "lerp075x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.75)),
+    "lerp110x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.1)),
+    "lerp125x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.25)),
+    "lerp150x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.5)),
     # Simulates a brightening effect by adding tensor b to tensor a, scaled by t.
-    "lineardodge": BlendMode(lambda a, b, t: a + b * t),
-    # "nlineardodge": BlendMode(lambda a, b, t: a + b * t, normalize),
+    "lineardodge": BlendMode(lambda a, b, t: (b * t).add_(a)),
+    "copysign": BlendMode(lambda a, b, _t: torch.copysign(a, b)),
+    "probcopysign": BlendMode(lambda a, b, t: torch.copysign(a, prob_blend(a, b, t))),
     # Simulates a brightening effect by dividing a by (1 - b) with a small epsilon to avoid division by zero.
-    "colordodge": BlendMode(lambda a, b, _t: a / (1 - b + 1e-6), allow_scale=False),
+    "colordodge": BlendMode(
+        lambda a, b, _t: a / (1 - b + 1e-6),
+        allow_scale=False,
+        force_rescale=True,
+    ),
     "difference": BlendMode(
         lambda a, b, t: abs(a - b) * t,
-        normalize,
+        # normalize,
         allow_scale=False,
+        force_rescale=True,
     ),
     "exclusion": BlendMode(
         lambda a, b, t: (a + b - 2 * a * b) * t,
-        normalize,
+        # normalize,
         allow_scale=False,
+        force_rescale=True,
     ),
     "glow": BlendMode(
         lambda a, b, _t: torch.where(
@@ -282,6 +580,7 @@ BLENDING_MODES = {
             b * (a - 1) / (a + 1e-6),
         ),
         allow_scale=False,
+        force_rescale=True,
     ),
     "hardlight": BlendMode(
         lambda a, b, t: (
@@ -290,12 +589,14 @@ BLENDING_MODES = {
         )
         * t,
         allow_scale=False,
+        force_rescale=True,
     ),
     "linearlight": BlendMode(
         lambda a, b, _t: torch.where(b <= 0.5, a + 2 * b - 1, a + 2 * (b - 0.5)),
+        force_rescale=True,
     ),
     "multiply": BlendMode(
-        lambda a, b, t: a * t * b * t,
+        lambda a, b, t: (a * t).mul_(b * t),
         normalize,
         allow_scale=False,
     ),
@@ -304,6 +605,7 @@ BLENDING_MODES = {
         if torch.all(b < 0.5)
         else (1 - 2 * (1 - a) * (1 - b)) * t,
         allow_scale=False,
+        force_rescale=True,
     ),
     # Combines tensors a and b using the Pin Light formula.
     "pinlight": BlendMode(
@@ -312,6 +614,7 @@ BLENDING_MODES = {
             torch.min(a, 2 * b),
             torch.max(a, 2 * b - 1),
         ),
+        force_rescale=True,
     ),
     "reflect": BlendMode(
         lambda a, b, _t: torch.where(
@@ -320,10 +623,12 @@ BLENDING_MODES = {
             a * (b - 1) / (b + 1e-6),
         ),
         allow_scale=False,
+        force_rescale=True,
     ),
     "screen": BlendMode(
         lambda a, b, t: 1 - (1 - a) * (1 - b) * (1 - t),
         allow_scale=False,
+        force_rescale=True,
     ),
     "subtract": BlendMode(lambda a, b, t: a * t - b * t, allow_scale=False),
     "vividlight": BlendMode(
@@ -333,6 +638,7 @@ BLENDING_MODES = {
             (a + 2 * b - 1) / (2 * (1 - b) + 1e-6),
         ),
         allow_scale=False,
+        force_rescale=True,
     ),
 }
 
@@ -443,6 +749,12 @@ UPSCALE_METHODS = (
     "nearest-exact",
     "bilinear",
     "area",
+    "adaptive_avg_pool2d",
+    "adaptive_max_pool2d",
+    "fractional_max_pool2d",
+    "lp_pool2d_1",
+    "lp_pool2d_2",
+    "lp_pool2d_4",
     *BIDERP_MODES.keys(),
     *(
         f"{meth}+{enh}"
@@ -483,7 +795,7 @@ def make_filter(channels, dtype, size=3):
 def antialias_tensor(x, antialias_size):
     channels = x.shape[1]
     filt = make_filter(channels, x.dtype, antialias_size).to(x.device)
-    return torch.nn.functional.conv2d(x, filt, groups=channels, padding="same")
+    return nnf.conv2d(x, filt, groups=channels, padding="same")
 
 
 def enhance_tensor(  # noqa: PLR0911
@@ -498,37 +810,36 @@ def enhance_tensor(  # noqa: PLR0911
     randitems = None
     orig_scale = scale
     randskip = 0
-    match name:
-        case "randmultihilowpass":
-            scale *= 0.1
-            randskip = 4
-            randitems = ("multilowpass", "multihighpass")
-        case "randhilowpass":
-            scale *= 0.1
-            randskip = 6
-            randitems = ("lowpass", "highpass")
-        case "randlowbandpass":
-            scale *= 0.25
-            randskip = 1
-            randitems = ("lowpass", "multilowpass", "bandpass")
-        case "randhibandpass":
-            scale *= 0.25
-            randskip = 1
-            randitems = ("highpass", "multihighpass", "bandpass")
-        case "bandpass":
-            scale *= 0.2
-        case "renoise1" | "renoise2":
-            if sigma is None:
-                return x
-            noise_scale = (
-                min(sigma / 6.0, 2.0 / max(sigma, 1e-05))
-                if name == "renoise1"
-                else sigma / 8.0
-            )
-            if noise_scale < 1e-04:
-                return x
-            noise = torch.randn_like(x)
-            return noise.mul_(noise_scale).add_(x)
+    if name == "randmultihilowpass":
+        scale *= 0.1
+        randskip = 4
+        randitems = ("multilowpass", "multihighpass")
+    elif name == "randhilowpass":
+        scale *= 0.1
+        randskip = 6
+        randitems = ("lowpass", "highpass")
+    elif name == "randlowbandpass":
+        scale *= 0.25
+        randskip = 1
+        randitems = ("lowpass", "multilowpass", "bandpass")
+    elif name == "randhibandpass":
+        scale *= 0.25
+        randskip = 1
+        randitems = ("highpass", "multihighpass", "bandpass")
+    elif name == "bandpass":
+        scale *= 0.2
+    elif name in {"renoise1", "renoise2"}:
+        if sigma is None:
+            return x
+        noise_scale = (
+            min(sigma / 6.0, 2.0 / max(sigma, 1e-05))
+            if name == "renoise1"
+            else sigma / 8.0
+        )
+        if noise_scale < 1e-04:
+            return x
+        noise = torch.randn_like(x)
+        return noise.mul_(noise_scale).add_(x)
     if not adjust_scale:
         scale = orig_scale
     randskip = int(randskip * skip_multiplier)
@@ -542,31 +853,27 @@ def enhance_tensor(  # noqa: PLR0911
         if not adjust_scale:
             scale *= 2
         return ffilter(x, 1, 1.0, fpreset, 0.5 * scale)
-    match name:
-        case "korniabilateralblur":
-            return x + (kf.bilateral_blur(x, (3, 3), 0.1, (1.5, 1.5)) - x) * (
-                scale * 2.0
-            )
-        case "korniagaussianblur":
-            return kf.gaussian_blur2d(x, (3, 3), (1.5, 1.5)) * scale
-        case "korniasharpen":
-            return x + (kf.unsharp_mask(x, (3, 3), (1.5, 1.5)) - x) * (scale / 2.0)
-        case "korniaedge" | "korniarevedge":
-            blur = kf.bilateral_blur(x, (3, 3), 0.1, (1.5, 1.5)) - x
-            sharpened = kf.unsharp_mask(x, (3, 3), (1.5, 1.5)) - x
-            if name == "korniarevedge":
-                scale *= -1.0
-            return x + (sharpened + blur) * (scale / 2.0)
-        case "korniarandblursharp":
-            return enhance_tensor(
-                x,
-                "korniagaussianblur"
-                if torch.rand(1, device="cpu").item() < 0.5
-                else "korniasharpen",
-                scale=scale,
-            )
-        case _:
-            raise ValueError("Unknown enhancement")
+    if name == "korniabilateralblur":
+        return x + (kf.bilateral_blur(x, (3, 3), 0.1, (1.5, 1.5)) - x) * (scale * 2.0)
+    if name == "korniagaussianblur":
+        return kf.gaussian_blur2d(x, (3, 3), (1.5, 1.5)) * scale
+    if name == "korniasharpen":
+        return x + (kf.unsharp_mask(x, (3, 3), (1.5, 1.5)) - x) * (scale / 2.0)
+    if name in {"korniaedge", "korniarevedge"}:
+        blur = kf.bilateral_blur(x, (3, 3), 0.1, (1.5, 1.5)) - x
+        sharpened = kf.unsharp_mask(x, (3, 3), (1.5, 1.5)) - x
+        if name == "korniarevedge":
+            scale *= -1.0
+        return x + (sharpened + blur) * (scale / 2.0)
+    if name == "korniarandblursharp":
+        return enhance_tensor(
+            x,
+            "korniagaussianblur"
+            if torch.rand(1, device="cpu").item() < 0.5
+            else "korniasharpen",
+            scale=scale,
+        )
+    raise ValueError("Unknown enhancement")
 
 
 @torch.no_grad()
@@ -601,11 +908,30 @@ def scale_samples(
         )
         mode_h = mode
     if mode in {"bicubic", "nearest-exact", "bilinear", "area"}:
-        result = torch.nn.functional.interpolate(
+        result = nnf.interpolate(
             samples,
             size=(height, width),
             mode=mode,
             antialias=antialias_size > 7,
+        )
+    elif mode == "adaptive_avg_pool2d":
+        result = nnf.adaptive_avg_pool2d(samples, (height, width))
+    elif mode == "adaptive_max_pool2d":
+        result = nnf.adaptive_max_pool2d(samples, (height, width))
+    elif mode == "fractional_max_pool2d":
+        h, w = samples.shape[-2:]
+        result = nnf.fractional_max_pool2d(
+            samples,
+            kernel_size=3,
+            output_ratio=(height / h, width / w),
+        )
+    elif mode.startswith("lp_pool2d_"):
+        h, w = samples.shape[-2:]
+        result = nnf.lp_pool2d(
+            samples,
+            float(mode.rsplit("_", 1)[1]),
+            kernel_size=(int(h // height), int(w // width)),
+            ceil_mode=True,
         )
     else:
         result = biderp(samples, width, height, mode, mode_h)
@@ -635,7 +961,7 @@ def biderp(samples, width, height, mode="bislerp", mode_h=None):  # noqa: PLR091
         coords_1 = torch.arange(length_old, dtype=torch.float32, device=device).reshape(
             (1, 1, 1, -1),
         )
-        coords_1 = torch.nn.functional.interpolate(
+        coords_1 = nnf.interpolate(
             coords_1,
             size=(1, length_new),
             mode="bilinear",
@@ -650,7 +976,7 @@ def biderp(samples, width, height, mode="bislerp", mode_h=None):  # noqa: PLR091
             + 1
         )
         coords_2[:, :, :, -1] -= 1
-        coords_2 = torch.nn.functional.interpolate(
+        coords_2 = nnf.interpolate(
             coords_2,
             size=(1, length_new),
             mode="bilinear",

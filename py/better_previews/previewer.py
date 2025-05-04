@@ -332,14 +332,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
     ) -> tuple[int, int]:
         max_cols = self.max_batch_cols
         ratio = height / width
-        if ratio >= 1.45:
-            # Very tall images - prioritize horizontal layout.
-            cols = min(math.ceil(batch_size / 2), max_cols)
-        elif ratio <= 0.5:
-            # Very wide images - prioritize vertical layout.
-            cols = min(math.ceil(batch_size / 4), max_cols)
-        else:
-            cols = min(math.ceil(batch_size / math.ceil(ratio) / 2.0), max_cols)
+        cols = max(1, min(round((batch_size * ratio) ** 0.5), max_cols, batch_size))
         rows = math.ceil(batch_size / cols)
         return cols, rows
 

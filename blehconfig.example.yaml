@@ -58,7 +58,7 @@ betterTaesdPreviews:
     # Bleh will delegate to the normal previewer for any latent formats in the blacklist.
     blacklist_formats: []
 
-    # Controls whether video previewing uses parallel mode (faster, requires more memory).
+    # Controls whether video previewing uses parallel mode (faster, requires much more memory).
     video_parallel: false
 
     # Maximum frames to include in a preview. -1 means no limit.
@@ -68,10 +68,3 @@ betterTaesdPreviews:
     # Number of temporal upscale blocks to run. 2 is the maximum and will fully decode
     # the latent into image frames.
     video_temporal_upscale_level: 0
-
-    # One of: video, batch, both, none
-    # Probably will only work if you set the preview type to webp.
-    # When active, rows/columns are ignored and batch items or video frames will be
-    # produced as an animated WEBP.
-    # NOTE: Does not work correctly yet.
-    animate_preview: none
