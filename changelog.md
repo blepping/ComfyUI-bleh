@@ -2,10 +2,20 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20250504
+
+This is a fairly large set of changes. Please create an issue if you experience problems.
+
+* Support for TAE video models/video previewing.
+* Added `BlehTAEVideoEncode` and `BlehTAEVideoDecode` nodes for fast video latent encoding/decoding.
+* Added many more blend modes.
+* Added `BlehEnsurePreviewer` node (for use when other custom node packs overwrite Bleh's previewer).
+
 ## 20250313
 
 * Added OOM fallback to the previewer.
 * Added ability to compile the previewer (and a few other related options).
+* Added `BlehEnsurePreviewer` node that can be used to ensure Bleh's previewer is used if some other custom node overrides it.
 
 ## 20250119
 

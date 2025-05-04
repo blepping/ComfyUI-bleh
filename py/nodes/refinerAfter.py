@@ -73,40 +73,39 @@ class BlehRefinerAfter:
         ms = self.get_real_model(model).model_sampling
         real_refiner_model = None
 
-        match time_mode:
-            case "sigma":
-                if start_time <= ms.sigma_min:
-                    return (model,)
-                if start_time >= ms.sigma_max:
-                    return (refiner_model,)
+        if time_mode == "sigma":
+            if start_time <= ms.sigma_min:
+                return (model,)
+            if start_time >= ms.sigma_max:
+                return (refiner_model,)
 
-                def check_time(sigma):
-                    return sigma.item() <= start_time
+            def check_time(sigma):
+                return sigma.item() <= start_time
 
-            case "percent":
-                if start_time > 1.0 or start_time < 0.0:
-                    raise ValueError(
-                        "BlehRefinerAfter: invalid value for percent start time",
-                    )
-                if start_time >= 1.0:
-                    return (model,)
-                if start_time <= 0.0:
-                    return (refiner_model,)
+        elif time_mode == "percent":
+            if start_time > 1.0 or start_time < 0.0:
+                raise ValueError(
+                    "BlehRefinerAfter: invalid value for percent start time",
+                )
+            if start_time >= 1.0:
+                return (model,)
+            if start_time <= 0.0:
+                return (refiner_model,)
 
-                def check_time(sigma):
-                    return sigma.item() <= ms.percent_to_sigma(start_time)
+            def check_time(sigma):
+                return sigma.item() <= ms.percent_to_sigma(start_time)
 
-            case "timestep":
-                if start_time <= 0.0:
-                    return (model,)
-                if start_time >= 999.0:
-                    return (refiner_model,)
+        elif time_mode == "timestep":
+            if start_time <= 0.0:
+                return (model,)
+            if start_time >= 999.0:
+                return (refiner_model,)
 
-                def check_time(sigma):
-                    return ms.timestep(sigma) <= start_time
+            def check_time(sigma):
+                return ms.timestep(sigma) <= start_time
 
-            case _:
-                raise ValueError("BlehRefinerAfter: invalid time mode")
+        else:
+            raise ValueError("BlehRefinerAfter: invalid time mode")
 
         def unet_wrapper(apply_model, args):
             nonlocal real_refiner_model

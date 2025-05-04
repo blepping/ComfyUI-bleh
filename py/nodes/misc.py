@@ -7,6 +7,8 @@ from decimal import Decimal
 import torch
 from comfy import model_management
 
+from ..better_previews.previewer import ensure_previewer  # noqa: TID252
+
 
 class DiscardPenultimateSigma:
     @classmethod
@@ -287,3 +289,32 @@ class BlehSetSigmas:
                     argb = sigmas_b
                 sigmas_out[start_index : start_index + newlen] = opfun(arga, argb)
         return (sigmas_out.to(torch.float),)
+
+
+class BlehEnsurePreviewer:
+    DESCRIPTION = "This node ensures Bleh is used for previews. Can be used if other custom nodes overwrite the Bleh previewer. It will pass through any value unchanged."
+    FUNCTION = "go"
+    OUTPUT_NODE = False
+    CATEGORY = "hacks"
+
+    WILDCARD = Wildcard("*")
+    RETURN_TYPES = (WILDCARD,)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "any_input": (
+                    cls.WILDCARD,
+                    {
+                        "forceInput": True,
+                        "description": "You can connect any type of input here, but take to ensure that you connect the output from this node to an input that is compatible.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def go(cls, *, any_input):
+        ensure_previewer()
+        return (any_input,)
