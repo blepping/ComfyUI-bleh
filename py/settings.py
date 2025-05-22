@@ -16,10 +16,9 @@ class Settings:
         self.btp_max_batch = max(1, btp.get("max_batch", 4))
         self.btp_max_batch_cols = max(1, btp.get("max_batch_cols", 2))
         self.btp_throttle_secs = btp.get("throttle_secs", 1)
-        self.btp_throttle_secs_fallback = btp.get(
-            "throttle_secs_fallback",
-            self.btp_throttle_secs,
-        )
+        self.btp_throttle_secs_fallback = btp.get("throttle_secs_fallback")
+        if self.btp_throttle_secs_fallback is None:
+            self.btp_throttle_secs_fallback = self.btp_throttle_secs
         self.btp_skip_upscale_layers = btp.get("skip_upscale_layers", 0)
         self.btp_preview_device = btp.get("preview_device")
         # default, keep, float32, float16, bfloat16

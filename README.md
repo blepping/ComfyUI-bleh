@@ -6,17 +6,18 @@ For recent user-visible changes, please see the [ChangeLog](changelog.md).
 
 ## Features
 
-1. Better TAESD previews (see below).
-2. Allow setting seed, timestep range and step interval for HyperTile (look for the [`BlehHyperTile`](#blehhypertile) node).
-3. Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the [`BlehDeepShrink`](#blehdeepshrink) node).
-4. Allow discarding penultimate sigma (look for the `BlehDiscardPenultimateSigma` node). This can be useful if you find certain samplers are ruining your image by spewing a bunch of noise into it at the very end (usually only an issue with `dpm2 a` or SDE samplers).
-5. Allow more conveniently switching between samplers during sampling (look for the [BlehInsaneChainSampler](#blehinsanechainsampler) node).
-6. Apply arbitrary model patches at an interval and/or for a percentage of sampling (look for the [BlehModelPatchConditional](#blehmodelpatchconditional) node).
-7. Ensure a seed is set even when `add_noise` is turned off in a sampler. Yes, that's right: if you don't have `add_noise` enabled _no_ seed gets set for samplers like `euler_a` and it's not possible to reproduce generations. (look for the [BlehForceSeedSampler](#blehforceseedsampler) node). For `SamplerCustomAdvanced` you can use `BlehDisableNoise` to accomplish the same thing.
-8. Allows swapping to a refiner model at a predefined time (look for the [BlehRefinerAfter](#blehrefinerafter) node).
-9. Allow defining arbitrary model patches (look for the [BlehBlockOps](#blehblockops) node).
-10. Experimental blockwise CFG type effect (look for the [BlehBlockCFG](#blehblockcfg) node).
-11. [SageAttention](https://github.com/thu-ml/SageAttention/) support either globally or as a sampler wrapper. Look for the [BlehSageAttentionSampler](#blehsageattentionsampler) and `BlehGlobalSageAttention` nodes.
+* Better TAESD previews (see below).
+* Visual previews for some audio models (currently only ACE-Steps).
+* Allow setting seed, timestep range and step interval for HyperTile (look for the [`BlehHyperTile`](#blehhypertile) node).
+* Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the [`BlehDeepShrink`](#blehdeepshrink) node).
+* Allow discarding penultimate sigma (look for the `BlehDiscardPenultimateSigma` node). This can be useful if you find certain samplers are ruining your image by spewing a bunch of noise into it at the very end (usually only an issue with `dpm2 a` or SDE samplers).
+* Allow more conveniently switching between samplers during sampling (look for the [BlehInsaneChainSampler](#blehinsanechainsampler) node).
+* Apply arbitrary model patches at an interval and/or for a percentage of sampling (look for the [BlehModelPatchConditional](#blehmodelpatchconditional) node).
+* Ensure a seed is set even when `add_noise` is turned off in a sampler. Yes, that's right: if you don't have `add_noise` enabled _no_ seed gets set for samplers like `euler_a` and it's not possible to reproduce generations. (look for the [BlehForceSeedSampler](#blehforceseedsampler) node). For `SamplerCustomAdvanced` you can use `BlehDisableNoise` to accomplish the same thing.
+* Allows swapping to a refiner model at a predefined time (look for the [BlehRefinerAfter](#blehrefinerafter) node).
+* Allow defining arbitrary model patches (look for the [BlehBlockOps](#blehblockops) node).
+* Experimental blockwise CFG type effect (look for the [BlehBlockCFG](#blehblockcfg) node).
+* [SageAttention](https://github.com/thu-ml/SageAttention/) support either globally or as a sampler wrapper. Look for the [BlehSageAttentionSampler](#blehsageattentionsampler) and `BlehGlobalSageAttention` nodes.
 
 ## Configuration
 
@@ -29,6 +30,9 @@ Restart ComfyUI to apply any new changes.
 * Supports setting max preview size (ComfyUI default is hardcoded to 512 max).
 * Supports showing previews for more than the first latent in the batch.
 * Supports throttling previews. Do you really need your expensive high quality preview to get updated 3 times a second?
+
+The previewer can now show visual previews for ACE-Steps latents. If you want to disable that feature, you can add `aceaudio` to the
+`blacklist_formats` list. For example if you are using a YAML configuration file you could do: `blacklist_formats: ["aceaudio"]`
 
 **General settings defaults:**
 
