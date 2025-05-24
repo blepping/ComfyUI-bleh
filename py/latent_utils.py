@@ -395,6 +395,42 @@ def gradient_blend(
     return result
 
 
+def slice_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    flatten=True,
+    dim=1,
+    flip_a=False,
+    flip_b=False,
+    flip_out=False,
+) -> torch.Tensor:
+    if isinstance(t, torch.Tensor) and t.ndim > 0 and t.numel() > 1:
+        t = t.mean()
+    orig_shape = a.shape
+    if a.ndim > 2 and flatten:
+        a = a.flatten(start_dim=dim)
+        b = b.flatten(start_dim=dim)
+    elsb = int(a.shape[dim] * t)
+    elsa = a.shape[dim] - elsb
+    astart, aend = (None, elsa) if not flip_a else (a.shape[dim] - elsa, None)
+    bstart, bend = (None, elsb) if flip_b else (a.shape[dim] - elsb, None)
+    aslice = tuple(
+        slice(None) if i != dim else slice(astart, aend) for i in range(a.ndim)
+    )
+    bslice = tuple(
+        slice(None) if i != dim else slice(bstart, bend) for i in range(a.ndim)
+    )
+    achunk, bchunk = a[aslice], b[bslice]
+    # print(
+    #     f"\nBLENDING: astart={astart}, aend={aend}, bstart={bstart}, bend={bend}, shape={orig_shape}, ashape={achunk.shape}, bshape={bchunk.shape}, aslice={aslice}, bslice={bslice}",
+    # )
+    result = torch.cat((bchunk, achunk) if flip_out else (achunk, bchunk), dim=dim)
+    # print(f"OUT SHAPE: {result.shape}")
+    return result.reshape(orig_shape)
+
+
 class BlendMode:
     __slots__ = (
         "allow_scale",
@@ -555,6 +591,41 @@ BLENDING_MODES = {
     "lineardodge": BlendMode(lambda a, b, t: (b * t).add_(a)),
     "copysign": BlendMode(lambda a, b, _t: torch.copysign(a, b)),
     "probcopysign": BlendMode(lambda a, b, t: torch.copysign(a, prob_blend(a, b, t))),
+    "slice_flat_d1": BlendMode(partial(slice_blend, dim=1, flatten=True)),
+    "slice_flat_d2": BlendMode(partial(slice_blend, dim=2, flatten=True)),
+    "slice_d1": BlendMode(partial(slice_blend, dim=1, flatten=False)),
+    "slice_d2": BlendMode(partial(slice_blend, dim=2, flatten=False)),
+    "slice_d3": BlendMode(partial(slice_blend, dim=3, flatten=False)),
+    "slice_d1_flip": BlendMode(
+        partial(
+            slice_blend,
+            dim=1,
+            flatten=False,
+            flip_a=True,
+            flip_b=True,
+            flip_out=True,
+        ),
+    ),
+    "slice_d2_flip": BlendMode(
+        partial(
+            slice_blend,
+            dim=2,
+            flatten=False,
+            flip_a=True,
+            flip_b=True,
+            flip_out=True,
+        ),
+    ),
+    "slice_d3_flip": BlendMode(
+        partial(
+            slice_blend,
+            dim=3,
+            flatten=False,
+            flip_a=True,
+            flip_b=True,
+            flip_out=True,
+        ),
+    ),
     # Simulates a brightening effect by dividing a by (1 - b) with a small epsilon to avoid division by zero.
     "colordodge": BlendMode(
         lambda a, b, _t: a / (1 - b + 1e-6),

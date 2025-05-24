@@ -1,3 +1,4 @@
+# ruff: noqa: PLR6104
 from __future__ import annotations
 
 import contextlib
@@ -43,7 +44,7 @@ else:
     sageattn_version = "unknown"
 
 
-def attention_sage(
+def attention_sage(  # noqa: PLR0914
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -109,6 +110,16 @@ def attention_sage(
     sm_scale_hd = kwargs.pop(f"sm_scale_{dim_head}", None)
     if sm_scale_hd is not None:
         kwargs["sm_scale"] = sm_scale_hd
+    q_multiplier = kwargs.pop("q_multiplier", 1.0)
+    k_multiplier = kwargs.pop("k_multiplier", 1.0)
+    v_multiplier = kwargs.pop("v_multiplier", 1.0)
+    output_multiplier = kwargs.pop("output_multiplier", 1.0)
+    if q_multiplier != 1.0:
+        q = q * q_multiplier
+    if k_multiplier != 1.0:
+        k = k * k_multiplier
+    if v_multiplier != 1.0:
+        v = v * v_multiplier
     result = sageattn_function(
         q,
         k,
@@ -118,6 +129,8 @@ def attention_sage(
         dropout_p=0.0,
         **kwargs,
     )
+    if output_multiplier != 1.0:
+        result = result * output_multiplier
     if do_transpose:
         result = result.transpose(1, 2)
     if not skip_output_reshape:

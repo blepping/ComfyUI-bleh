@@ -10,6 +10,11 @@
     "skip_upscale_layers": 0,
     "compile_previewer": false,
     "oom_fallback": "latent2rgb",
-    "oom_retry": true
+    "oom_retry": true,
+    "whitelist_formats": [],
+    "blacklist_formats": [],
+    "video_parallel": false,
+    "video_max_frames": -1,
+    "video_temporal_upscale_level": 0
   }
 }

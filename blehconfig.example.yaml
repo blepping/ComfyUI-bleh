@@ -21,12 +21,22 @@ betterTaesdPreviews:
     # Minimum time between updating previews. The default will update the preview at most once per second.
     throttle_secs: 1
 
+    # Can be set to use a different throttle time when using the fallback previewer
+    # (anything other than TAESD or TAEVID). If unset or null it will use throttle_secs.
+    throttle_secs_fallback: null
+
     # When enabled and previewing batches, you will see previews spread across the batch. Otherwise it will be the first max_batch items.
     maxed_batch_step_mode: false
 
     # Allows overriding the preview device, for example you could set it to "cpu". Note: Generally should be left
     # alone unless you know you need to change it. Previewing on CPU will likely be quite slow.
     preview_device: null
+
+    # Can be set to override the previewer dtype (which probably defaults to float32).
+    # You may set it to a specific dtype: float32, float16, bfloat16
+    # Setting it to "keep" or null just leaves the dtype alone (which is probably float32).
+    # Setting it to "vae" will use whatever dtype ComfyUI is set to use for VAE.
+    preview_dtype: null
 
     # Allows skipping upscale layers in the TAESD model, may increase performance when previewing large images or batches.
     # May be set to -1 (conservative) or -2 (aggressive) to automatically calculate how many to skip. See README.md for details.
