@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 from functools import partial
+from typing import ClassVar
 
 import kornia.filters as kf
 import numpy as np
@@ -196,27 +197,6 @@ def altslerp(  # noqa: PLR0914
     return out
 
 
-# def prob_blend_(a, b, t, *, cpu=False):
-#     if not isinstance(t, torch.Tensor):
-#         t = torch.tensor((t,), dtype=a.dtype, device=a.device)
-#     tmin, tmax = t.aminmax()
-#     tmin, tmax = min(tmin, 0.0), max(tmax, 1.0)
-#     t = t - tmin
-#     tdiv = tmax - tmin
-#     if tdiv != 0:
-#         t /= tdiv
-#     t = t.broadcast_to(a.shape)
-#     probs = torch.rand(
-#         *a.shape,
-#         dtype=a.dtype,
-#         layout=a.layout,
-#         device="cpu" if cpu else a.device,
-#     )
-#     if probs.device != a.device:
-#         probs = probs.to(a.device)
-#     return torch.where(probs > t, a, b)
-
-
 def stochasistic_blend(
     a,
     b,
@@ -247,22 +227,6 @@ def stochasistic_blend(
         tmin, tmax = t_orig.aminmax()
         tadj = tadj.clamp_(min(0, tmin), max(1.0, tmax))
     return blend(a, b, tadj)
-
-
-def prob_blend(a, b, t, *, cpu=False):
-    t_device = torch.device("cpu") if cpu else a.device
-    if not isinstance(t, torch.Tensor):
-        t = torch.tensor((t,), dtype=a.dtype, device=t_device)
-    elif t.device != t_device:
-        t = t.detach().clone().to(t_device)
-    tmin, tmax = t.aminmax()
-    tmin, tmax = min(tmin, 0.0), max(tmax, 1.0)
-    t = t - tmin  # noqa: PLR6104
-    tdiv = tmax - tmin
-    if tdiv != 0:
-        t /= tdiv
-    t = t.clamp_(0, 1).broadcast_to(a.shape)
-    return torch.where(torch.bernoulli(t).to(device=a.device, dtype=torch.bool), b, a)
 
 
 def gaussian_smoothing(
@@ -308,31 +272,63 @@ def gaussian_smoothing(
     return result
 
 
-def prob_blend_smoothed(
-    a,
-    b,
-    t,
-    *,
-    cpu: bool = False,
-    blend=torch.lerp,
-    kernel_size: int | tuple | list = 3,
-    sigma: float | tuple | list = 1.0,
-):
-    t_device = torch.device("cpu") if cpu else a.device
-    if not isinstance(t, torch.Tensor):
-        t = torch.tensor((t,), dtype=a.dtype, device=t_device)
-    elif t.device != t_device:
-        t = t.detach().clone().to(t_device)
-    tmin, tmax = t.aminmax()
-    tmin, tmax = min(tmin, 0.0), max(tmax, 1.0)
-    t = t - tmin  # noqa: PLR6104
-    tdiv = tmax - tmin
-    if tdiv != 0:
-        t /= tdiv
-    t = t.clamp_(0, 1).broadcast_to(a.shape)
-    t = torch.bernoulli(t).to(device=a.device, dtype=a.dtype)
-    t = gaussian_smoothing(t, kernel_size, sigma)
-    return blend(a, b, t)
+class ProbBlend:
+    @staticmethod
+    def output(a: torch.Tensor, b: torch.Tensor, b_t: torch.Tensor) -> torch.Tensor:
+        return torch.where(b_t.to(device=a.device, dtype=torch.bool), b, a)
+
+    def __call__(
+        self,
+        a,
+        b,
+        t,
+        *,
+        cpu=False,
+        collapse_dims=(),
+        **kwargs: dict,
+    ):
+        t_device = torch.device("cpu") if cpu else a.device
+        if not isinstance(t, torch.Tensor):
+            t = torch.tensor((t,), dtype=a.dtype, device=t_device)
+        elif t.device != t_device:
+            t = t.detach().clone().to(t_device)
+        tmin, tmax = t.aminmax()
+        tmin, tmax = min(tmin, 0.0), max(tmax, 1.0)
+        t = t - tmin  # noqa: PLR6104
+        tdiv = tmax - tmin
+        if tdiv != 0:
+            t /= tdiv
+        if collapse_dims:
+            dims = a.ndim
+            prob_shape = list(a.shape)
+            for didx in collapse_dims:
+                if didx >= dims:
+                    continue
+                prob_shape[didx] = 1
+        else:
+            prob_shape = a.shape
+        t = torch.bernoulli(t.clamp_(0, 1).broadcast_to(prob_shape)).to(a)
+        return self.output(a, b, t, **kwargs)
+
+
+class ProbBlendSmoothed(ProbBlend):
+    @staticmethod
+    def output(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        b_t: torch.Tensor,
+        *,
+        output_blend=torch.lerp,
+        kernel_size: int | tuple | list = 3,
+        sigma: float | tuple | list = 1.0,
+    ) -> torch.Tensor:
+        t = b_t.to(device=a.device, dtype=a.dtype)
+        t = gaussian_smoothing(t, kernel_size, sigma)
+        return output_blend(a, b, t)
+
+
+prob_blend = ProbBlend()
+prob_blend_smoothed = ProbBlendSmoothed()
 
 
 # Originally referenced from https://github.com/54rt1n/ComfyUI-DareMerge
@@ -406,8 +402,14 @@ def slice_blend(
     flip_b=False,
     flip_out=False,
 ) -> torch.Tensor:
-    if isinstance(t, torch.Tensor) and t.ndim > 0 and t.numel() > 1:
-        t = t.mean()
+    if isinstance(t, torch.Tensor):
+        t = t.mean().clamp(0, 1)
+    else:
+        t = a.new_full((1,), t).clamp(0, 1)
+    if t == 0:
+        return a
+    if t == 1:
+        return b
     orig_shape = a.shape
     if a.ndim > 2 and flatten:
         a = a.flatten(start_dim=dim)
@@ -423,18 +425,106 @@ def slice_blend(
         slice(None) if i != dim else slice(bstart, bend) for i in range(a.ndim)
     )
     achunk, bchunk = a[aslice], b[bslice]
-    # print(
-    #     f"\nBLENDING: astart={astart}, aend={aend}, bstart={bstart}, bend={bend}, shape={orig_shape}, ashape={achunk.shape}, bshape={bchunk.shape}, aslice={aslice}, bslice={bslice}",
-    # )
     result = torch.cat((bchunk, achunk) if flip_out else (achunk, bchunk), dim=dim)
-    # print(f"OUT SHAPE: {result.shape}")
     return result.reshape(orig_shape)
+
+
+def slice_blend_smooth(  # noqa: PLR0914
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    flatten: bool = True,
+    dim: int = 1,
+    fade_percent_l: float = 0.1,
+    fade_percent_r: float = 0.1,
+    always_fade: bool = False,
+    b_start_percent: float = 1.0,
+    b_blend_max: float = 1.0,
+    invert: bool = False,  # Doesn't work propertly at the moment.
+    blend_function=torch.lerp,
+) -> torch.Tensor:
+    if isinstance(t, torch.Tensor):
+        t = t.mean().clamp(0, 1)
+    else:
+        t = a.new_full((1,), t).clamp_(0, 1)
+    if invert:
+        t = 1 - t
+        b, a = a, b
+    if t == 0:
+        return a
+    b_start_percent = max(0.0, min(1.0, b_start_percent))
+    fade_percent_l = (
+        max(0.0, min(1.0, fade_percent_l))
+        if b_start_percent > 0 and not always_fade
+        else 0.0
+    )
+    fade_percent_r = (
+        max(0.0, min(1.0, fade_percent_r))
+        if b_start_percent < 1 and not always_fade
+        else 0.0
+    )
+    fade_mul = 1.0 / max(1.0, fade_percent_l + fade_percent_r)
+    orig_shape = a.shape
+    if flatten and dim < a.ndim - 1:
+        a = a.flatten(start_dim=dim)
+        b = b.flatten(start_dim=dim)
+    dim_els = a.shape[dim]
+    els_b = int(dim_els * t)
+    if invert:
+        els_b += int((dim_els - els_b) * (fade_percent_l + fade_percent_r) * fade_mul)
+
+    els_a = dim_els - els_b
+    b_start = int(els_a * b_start_percent)
+    b_end = b_start + els_b
+    elslfade, elsrfade = (
+        int(els_b * fade_percent_l * fade_mul),
+        int(els_b * fade_percent_r * fade_mul),
+    )
+    blend_mask = a.new_zeros(dim_els)
+    blend_mask[b_start:b_end] = b_blend_max
+    if elslfade > 0:
+        blend_mask[b_start : b_start + elslfade] = torch.linspace(
+            0.0,
+            b_blend_max,
+            steps=elslfade + 2,
+            device=blend_mask.device,
+            dtype=blend_mask.dtype,
+        )[1:-1]
+    if elsrfade > 0:
+        rfade_start = b_end - elsrfade
+        blend_mask[rfade_start : rfade_start + elsrfade] = torch.linspace(
+            b_blend_max,
+            0.0,
+            steps=elsrfade + 2,
+            device=blend_mask.device,
+            dtype=blend_mask.dtype,
+        )[1:-1]
+    blend_mask = blend_mask.view(
+        tuple(dim_els if d == dim else 1 for d in range(a.ndim)),
+    )
+    return blend_function(a, b, blend_mask).reshape(orig_shape)
+
+
+def lop_lerp(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: torch.tensor | float,
+    *,
+    a_ratio=1.0,
+    b_ratio=1.0,
+):
+    if not isinstance(t, torch.Tensor):
+        t = a.new_full((1,), t)
+    return (a_ratio - t.clamp(max=a_ratio)).mul(a).add_(b * (t * b_ratio))
 
 
 class BlendMode:
     __slots__ = (
         "allow_scale",
         "f",
+        "f_kwargs",
+        "f_raw",
         "force_rescale",
         "norm",
         "norm_dims",
@@ -454,8 +544,11 @@ class BlendMode:
         allow_scale=True,
         rescale_dims=(-3, -2, -1),
         force_rescale=False,
+        **kwargs: dict,
     ):
-        self.f = f
+        self.f_raw = f
+        self.f = f if not kwargs else partial(f, **kwargs)
+        self.f_kwargs = kwargs
         self.norm = norm
         self.norm_dims = norm_dims
         self.rev = rev
@@ -473,10 +566,13 @@ class BlendMode:
         allow_scale=_Empty,
         rescale_dims=_Empty,
         force_rescale=_Empty,
-    ):
+        preserve_kwargs=True,
+        **kwargs: dict,
+    ) -> object:
         empty = self._Empty
+        kwargs = (self.f_kwargs | kwargs) if preserve_kwargs else kwargs
         return self.__class__(
-            f if f is not empty else self.f,
+            f if f is not empty else self.f_raw,
             norm=norm if norm is not empty else self.norm,
             norm_dims=norm_dims if norm_dims is not empty else self.norm_dims,
             rev=rev if rev is not empty else self.rev,
@@ -487,6 +583,7 @@ class BlendMode:
             force_rescale=force_rescale
             if force_rescale is not empty
             else self.force_rescale,
+            **kwargs,
         )
 
     def rescale(self, t, *, rescale_dims=_Empty):
@@ -501,7 +598,7 @@ class BlendMode:
         tmax = torch.amax(t, keepdim=True, dim=rescale_dims)
         return (t - tmin).div_(tmax - tmin).clamp_(0, 1), tmin, tmax
 
-    def __call__(self, a, b, t, *, norm_dims=_Empty):
+    def __call__(self, a, b, t, *, norm_dims=_Empty) -> torch.Tensor:
         if not self.force_rescale:
             return self.__call__internal(a, b, t, norm_dims=norm_dims)
         a, amin, amax = self.rescale(a)
@@ -512,7 +609,7 @@ class BlendMode:
         del amin, amax, bmin, bmax
         return result.mul_(rmax.sub_(rmin)).add_(rmin)
 
-    def __call__internal(self, a, b, t, *, norm_dims=_Empty):
+    def __call__internal(self, a, b, t, *, norm_dims=_Empty) -> torch.Tensor:
         if not isinstance(t, torch.Tensor) and isinstance(a, torch.Tensor):
             t = a.new_full((1,), t)
         if self.rev:
@@ -526,18 +623,156 @@ class BlendMode:
         )
 
 
+class BlendingModes:
+    def __init__(self, builtins=None):
+        self.builtins = {} if builtins is None else builtins
+        self.cache = {}
+
+    def get(self, k: str, default=None):
+        result = self.builtins.get(k)
+        if result is not None:
+            return result
+        result = self.cache.get(k)
+        if result is not None:
+            return result
+        return self.try_extended(k, default=default)
+
+    _simple_value_map: ClassVar = {
+        "true": True,
+        "false": False,
+        "()": (),
+        "none": None,
+    }
+
+    def parse_value(self, k: str, v: str):
+        k = k.strip().lower()
+        v = v.strip()
+        vl = v.lower()
+        if not v:
+            raise ValueError("Empty value")
+        result = self._simple_value_map.get(vl, vl)
+        if result is not vl:
+            return result
+        v0 = v[0]
+        if v0.isdigit() or v0 in "-+":
+            if "," in v:
+                result = tuple(
+                    self.parse_value(k, subv)
+                    for subv in (_subv for _subv in v.split(",") if _subv.strip())
+                )
+                if len(result) > 1 and not all(
+                    subv.__class__ is result[0].__class__ for subv in result[1:]
+                ):
+                    errstr = f"Mismatched items in list for key {k}"
+                    raise ValueError(errstr)
+                return result
+            return float(v) if "." in v else int(v)
+        if k.startswith("blend"):
+            # It won't be a numeric value here.
+            result = self.builtins.get(v)
+            if result is None:
+                errstr = f"Unknown blend mode {v}"
+                raise ValueError(errstr)
+            return result
+        errstr = f"Couldn't handle key {k}"
+        raise ValueError(errstr)
+
+    def parse_arg(self, s: str, idx: int) -> tuple:
+        kv = s.split("=", 1)
+        if len(kv) != 2:
+            errstr = f"Failed to parse argument at position {idx}"
+            raise ValueError(errstr)
+        k, v = kv[0].strip(), kv[1].strip()
+        if not k:
+            errstr = f"Empty key at argument position {idx}"
+            raise ValueError(errstr)
+        try:
+            v_out = self.parse_value(k, v)
+        except ValueError as exc:
+            errstr = f"Parse failed at argument position {idx}: {exc}"
+            raise ValueError(errstr) from exc
+        return (k, v_out)
+
+    def try_extended(self, k: str, default=None) -> object:
+        if ":" not in k:
+            return default
+        name, *arglist = k.strip().split(":")
+        name = name.strip()
+        base_bm = self.builtins.get(name)
+        if base_bm is None:
+            errstr = f"Unknown mode {name} for extended blend specification"
+            raise ValueError(errstr)
+        bm_kwargs = dict(self.parse_arg(arg, idx) for idx, arg in enumerate(arglist))
+        bm = base_bm.edited(**bm_kwargs)
+        self.cache[k] = bm
+        return bm
+
+    def items(self):
+        return self.builtins.items()
+
+    def values(self):
+        return self.builtins.values()
+
+    def __contains__(self, k: str) -> bool:
+        return self.get(k) is not None
+
+    def __iter__(self):
+        return self.builtins.__iter__()
+
+    keys = __iter__
+
+    def __setitem__(self, k: str, v) -> str:
+        self.builtins[k] = v if isinstance(v, BlendMode) else BlendMode(v)
+
+    def __getitem__(self, k: str):
+        result = self.get(k)
+        if result is None:
+            raise KeyError(k)
+        return result
+
+    def __ior__(self, other: dict | object):
+        if isinstance(other, dict):
+            self.builtins |= {
+                k: v if isinstance(v, BlendMode) else BlendMode(v)
+                for k, v in other.items()
+            }
+            return self
+        self.builtins |= other.builtins
+        self.cache |= other.cache
+        return self
+
+    def __or__(self, other: dict | object) -> object:
+        clone = self.__class__()
+        clone.builtins = self.builtins.copy()
+        clone.cache = self.cache.copy()
+        if isinstance(other, dict):
+            clone.builtins |= {
+                k: v if isinstance(v, BlendMode) else BlendMode(v)
+                for k, v in other.items()
+            }
+            return clone
+        clone.builtins |= other.builtins
+        clone.cache |= other.cache
+        return clone
+
+    def copy(self):
+        return self | {}
+
+
 BLENDING_MODES = {
     # Args:
     #   - a (tensor): Latent input 1
     #   - b (tensor): Latent input 2
     #   - t (float): Blending factor
+    "a_only": BlendMode(lambda a, _b, t: a * t, allow_scale=False),
+    "b_only": BlendMode(lambda _a, b, t: b * t, allow_scale=False),
     # Interpolates between tensors a and b using normalized linear interpolation.
     "bislerp": BlendMode(
         lambda a, b, t: ((1 - t) * a).add_(t * b),
         normalize,
     ),
     # "nbislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b, normalize),
-    "slerp": BlendMode(lambda a, b, t: altslerp(a, b, t, dim=-1)),
+    "slerp": BlendMode(altslerp),
     # Transfer the color from `b` to `a` by t` factor
     "colorize": BlendMode(lambda a, b, t: (b - a).mul_(t).add_(a)),
     # Interpolates between tensors a and b using cosine interpolation.
@@ -552,34 +787,38 @@ BLENDING_MODES = {
     # with a twist when t is greater than or equal to 0.5.
     "hslerp": BlendMode(hslerp),
     "hslerpalt": BlendMode(hslerp_alt2),
-    "hslerpalt110x": BlendMode(partial(hslerp_alt2, sign_order=(1.1, -1.1))),
-    "hslerpalt125x": BlendMode(partial(hslerp_alt2, sign_order=(1.25, -1.25))),
-    "hslerpalt150x": BlendMode(partial(hslerp_alt2, sign_order=(1.5, -1.5))),
-    "hslerpalt300x": BlendMode(partial(hslerp_alt2, sign_order=(3.0, -3.0))),
-    "hslerpaltflipsign": BlendMode(partial(hslerp_alt2, sign_order=(-1.0, 1.0))),
-    "hslerpaltflipsign110x": BlendMode(partial(hslerp_alt2, sign_order=(-1.1, 1.1))),
-    "hslerpaltflipsign125x": BlendMode(partial(hslerp_alt2, sign_order=(-1.25, 1.25))),
-    "hslerpaltflipsign150x": BlendMode(partial(hslerp_alt2, sign_order=(-1.5, 1.5))),
-    "hslerpaltflipsign300x": BlendMode(partial(hslerp_alt2, sign_order=(-3.0, 3.0))),
-    "problerp0.25": BlendMode(partial(stochasistic_blend, fuzz=0.25)),
-    "problerp0.1": BlendMode(partial(stochasistic_blend, fuzz=0.1)),
-    "problerp0.025": BlendMode(partial(stochasistic_blend, fuzz=0.025)),
+    "hslerpalt110x": BlendMode(hslerp_alt2, sign_order=(1.1, -1.1)),
+    "hslerpalt125x": BlendMode(hslerp_alt2, sign_order=(1.25, -1.25)),
+    "hslerpalt150x": BlendMode(hslerp_alt2, sign_order=(1.5, -1.5)),
+    "hslerpalt300x": BlendMode(hslerp_alt2, sign_order=(3.0, -3.0)),
+    "hslerpaltflipsign": BlendMode(hslerp_alt2, sign_order=(-1.0, 1.0)),
+    "hslerpaltflipsign110x": BlendMode(hslerp_alt2, sign_order=(-1.1, 1.1)),
+    "hslerpaltflipsign125x": BlendMode(hslerp_alt2, sign_order=(-1.25, 1.25)),
+    "hslerpaltflipsign150x": BlendMode(hslerp_alt2, sign_order=(-1.5, 1.5)),
+    "hslerpaltflipsign300x": BlendMode(hslerp_alt2, sign_order=(-3.0, 3.0)),
+    "problerp0.25": BlendMode(stochasistic_blend, fuzz=0.25),
+    "problerp0.1": BlendMode(stochasistic_blend, fuzz=0.1),
+    "problerp0.025": BlendMode(stochasistic_blend, fuzz=0.025),
     "probselect": BlendMode(prob_blend),
+    "probselect_channels": BlendMode(prob_blend, collapse_dims=(1,)),
     "probselectsmoothed": BlendMode(prob_blend_smoothed),
-    "probselectsmoothed_ks5": BlendMode(partial(prob_blend_smoothed, kernel_size=5)),
-    "probselectsmoothed_ks9": BlendMode(partial(prob_blend_smoothed, kernel_size=9)),
+    "probselectsmoothed_channels": BlendMode(
+        prob_blend_smoothed,
+        collapse_dims=(1,),
+    ),
+    "probselectsmoothed_ks5": BlendMode(prob_blend_smoothed, kernel_size=5),
+    "probselectsmoothed_ks9": BlendMode(prob_blend_smoothed, kernel_size=9),
     "probselectsmoothed_ks9_sigma3": BlendMode(
-        partial(
-            prob_blend_smoothed,
-            kernel_size=9,
-            sigma=3.0,
-        ),
+        prob_blend_smoothed,
+        kernel_size=9,
+        sigma=3.0,
     ),
     "gradient": BlendMode(gradient_blend),
     # Adds tensor b to tensor a, scaled by t.
     "inject": BlendMode(lambda a, b, t: (b * t).add_(a)),
     "injecthalf": BlendMode(lambda a, b, t: (b * (t * 0.5)).add_(a)),
     "injectquarter": BlendMode(lambda a, b, t: (b * (t * 0.25)).add_(a)),
+    "inject_difference": BlendMode(lambda a, b, t: (a - b).mul_(t).add_(a)),
     # Interpolates between tensors a and b using linear interpolation.
     "lerp": BlendMode(lambda a, b, t: ((1 - t) * a).add_(t * b)),
     "lerp050x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.5)),
@@ -591,41 +830,42 @@ BLENDING_MODES = {
     "lineardodge": BlendMode(lambda a, b, t: (b * t).add_(a)),
     "copysign": BlendMode(lambda a, b, _t: torch.copysign(a, b)),
     "probcopysign": BlendMode(lambda a, b, t: torch.copysign(a, prob_blend(a, b, t))),
-    "slice_flat_d1": BlendMode(partial(slice_blend, dim=1, flatten=True)),
-    "slice_flat_d2": BlendMode(partial(slice_blend, dim=2, flatten=True)),
-    "slice_d1": BlendMode(partial(slice_blend, dim=1, flatten=False)),
-    "slice_d2": BlendMode(partial(slice_blend, dim=2, flatten=False)),
-    "slice_d3": BlendMode(partial(slice_blend, dim=3, flatten=False)),
+    "slice_flat_d1": BlendMode(slice_blend, dim=1, flatten=True),
+    "slice_flat_d2": BlendMode(slice_blend, dim=2, flatten=True),
+    "slice_d1": BlendMode(slice_blend, dim=1, flatten=False),
+    "slice_d2": BlendMode(slice_blend, dim=2, flatten=False),
+    "slice_d3": BlendMode(slice_blend, dim=3, flatten=False),
     "slice_d1_flip": BlendMode(
-        partial(
-            slice_blend,
-            dim=1,
-            flatten=False,
-            flip_a=True,
-            flip_b=True,
-            flip_out=True,
-        ),
+        slice_blend,
+        dim=1,
+        flatten=False,
+        flip_a=True,
+        flip_b=True,
+        flip_out=True,
     ),
     "slice_d2_flip": BlendMode(
-        partial(
-            slice_blend,
-            dim=2,
-            flatten=False,
-            flip_a=True,
-            flip_b=True,
-            flip_out=True,
-        ),
+        slice_blend,
+        dim=2,
+        flatten=False,
+        flip_a=True,
+        flip_b=True,
+        flip_out=True,
     ),
     "slice_d3_flip": BlendMode(
-        partial(
-            slice_blend,
-            dim=3,
-            flatten=False,
-            flip_a=True,
-            flip_b=True,
-            flip_out=True,
-        ),
+        slice_blend,
+        dim=3,
+        flatten=False,
+        flip_a=True,
+        flip_b=True,
+        flip_out=True,
     ),
+    "slicesmooth_d1": BlendMode(slice_blend_smooth, dim=1, flatten=False),
+    "slicesmooth_d2": BlendMode(slice_blend_smooth, dim=2, flatten=False),
+    "slicesmooth_d3": BlendMode(slice_blend_smooth, dim=3, flatten=False),
+    "loplerp_a098": BlendMode(lop_lerp, a_ratio=0.98),
+    "loplerp_a101": BlendMode(lop_lerp, a_ratio=1.01),
+    "loplerp_a102": BlendMode(lop_lerp, a_ratio=1.02),
+    "loplerp_a105": BlendMode(lop_lerp, a_ratio=1.05),
     # Simulates a brightening effect by dividing a by (1 - b) with a small epsilon to avoid division by zero.
     "colordodge": BlendMode(
         lambda a, b, _t: a / (1 - b + 1e-6),
@@ -702,6 +942,11 @@ BLENDING_MODES = {
         force_rescale=True,
     ),
     "subtract": BlendMode(lambda a, b, t: a * t - b * t, allow_scale=False),
+    "subtract_b": BlendMode(lambda a, b, t: a - b * t, allow_scale=False),
+    "subtract_b_scaleup_a": BlendMode(
+        lambda a, b, t: a * (1.0 + t) - b * t,
+        allow_scale=False,
+    ),
     "vividlight": BlendMode(
         lambda a, b, _t: torch.where(
             b <= 0.5,
@@ -720,6 +965,8 @@ BLENDING_MODES |= {
 }
 
 BLENDING_MODES |= {f"rev{k}": v.edited(rev=True) for k, v in BLENDING_MODES.items()}
+
+BLENDING_MODES = BlendingModes(BLENDING_MODES)
 
 BIDERP_MODES = {
     k: v.edited(norm_dims=0)

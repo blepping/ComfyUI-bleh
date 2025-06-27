@@ -1,5 +1,7 @@
+# ruff: noqa: TID252
 from __future__ import annotations
 
+import itertools
 import operator
 import random
 from decimal import Decimal
@@ -7,7 +9,8 @@ from decimal import Decimal
 import torch
 from comfy import model_management
 
-from ..better_previews.previewer import ensure_previewer  # noqa: TID252
+from .. import latent_utils
+from ..better_previews.previewer import ensure_previewer
 
 
 class DiscardPenultimateSigma:
@@ -318,3 +321,101 @@ class BlehEnsurePreviewer:
     def go(cls, *, any_input):
         ensure_previewer()
         return (any_input,)
+
+
+# class BlehConditioningBlend:
+#     DESCRIPTION = "TBD"
+#     FUNCTION = "go"
+#     CATEGORY = "conditioning/advanced"
+#     RETURN_TYPES = ("CONDITIONING",)
+
+#     @classmethod
+#     def INPUT_TYPES(cls) -> dict:
+#         return {
+#             "required": {
+#                 "conditioning_a": ("CONDITIONING",),
+#                 "conditioning_b": ("CONDITIONING",),
+#                 "blend_mode": (
+#                     tuple(latent_utils.BLENDING_MODES.keys()),
+#                     {"default": "lerp"},
+#                 ),
+#                 "conditioning_b_strength": (
+#                     "FLOAT",
+#                     {
+#                         "default": 0.5,
+#                         "min": -1000.0,
+#                         "max": 1000.0,
+#                     },
+#                 ),
+#                 "pad_value": (
+#                     "FLOAT",
+#                     {
+#                         "default": 0.0,
+#                         "min": -10000.0,
+#                         "max": 10000.0,
+#                     },
+#                 ),
+#                 "blend_pad": (
+#                     "BOOLEAN",
+#                     {
+#                         "default": False,
+#                     },
+#                 ),
+#                 "skip_missing": (
+#                     "BOOLEAN",
+#                     {
+#                         "default": False,
+#                     },
+#                 ),
+#                 "move_to_cpu": (
+#                     "BOOLEAN",
+#                     {
+#                         "default": False,
+#                     },
+#                 ),
+#                 "blend_targets": (
+#                     "STRING",
+#                     {
+#                         "default": "default, pooled_output",
+#                         "tooltip": "default (with underscore) represents the base conditioning tensor, other values will be used to look up keys in the conditioning dictionary.",
+#                     },
+#                 ),
+#             },
+#             "optional": {
+#                 "conditioning_b": ("CONDITIONING",),
+#             },
+#         }
+
+#     @classmethod
+#     def go(
+#         cls,
+#         *,
+#         conditioning_a: list | tuple,
+#         blend_mode: str,
+#         conditioning_b_strength: float,
+#         pad_value: float,
+#         blend_pad: bool,
+#         skip_missing: bool,
+#         blend_targets: str,
+#         conditioning_b: list | tuple | None = None,
+#     ) -> tuple:
+#         blend_targets = tuple(
+#             t for t in (_t.strip() for _t in blend_targets.split(",")) if t
+#         )
+#         if not blend_targets:
+#             return (conditioning_a,)
+#         if conditioning_b is None:
+#             conditioning_b = []
+#         result = []
+#         for c_a, c_b in itertools.zip_longest(
+#             conditioning_a,
+#             conditioning_b,
+#         ):
+#             skip_alt = c_b if c_a is None else (c_a if c_b is None else None)
+#             if skip_alt is not None:
+#                 if skip_missing or skip_alt is c_b:
+#                     result.append([skip_alt[0].clone(), skip_alt[1].copy()])
+#                     continue
+#                 pass
+
+#         return (result,)

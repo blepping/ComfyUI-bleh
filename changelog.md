@@ -2,13 +2,16 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
-## 20250522
+## 20250627
 
 This set of changes involves refactoring parts of the previewer. Please create an issue if you experience problems.
 
 * It's now possible to set the previewer dtype, see the `preview_dtype` setting. Note: Previews probably have been using float32 which is likely slower/more memory intensive than necessary. I'd recommend setting it to `vae`, `bfloat16` or `float16`.
 * The previewer can show a visual representation of ACE-Steps latents (audio model). If you don't like it then you can add `aceaudio` to the `blacklist_formats` list in your configuration.
 * You can set `throttle_secs_fallback` to use a different throttle setting for the fallback previewer (which includes stuff like the ACE-Steps previewer).
+* Basic support for SpargeAttention, see README and https://github.com/thu-ml/SpargeAttn
+* The blend mode system has been rewritten, more blend modes.
+* Added a BlehCFGInitSampler sampler wrapper than can be used to skip steps like CFGZeroStar zero init, but without the cost of calling the model.
 
 ## 20250504
 

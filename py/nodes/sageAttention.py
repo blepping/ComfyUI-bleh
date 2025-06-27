@@ -6,6 +6,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 import comfy.ldm.modules.attention as comfyattn
+import torch
 import yaml
 from comfy.samplers import KSAMPLER
 
@@ -18,12 +19,15 @@ except ImportError:
     sageattn_default_head_sizes = None
     sageattn_default_function = None
 
+try:
+    import spas_sage_attn
+except ImportError:
+    spas_sage_attn = None
+
 
 if TYPE_CHECKING:
     import collections
     from collections.abc import Callable
-
-    import torch
 
 
 if sageattention is not None:
@@ -44,7 +48,7 @@ else:
     sageattn_version = "unknown"
 
 
-def attention_sage(  # noqa: PLR0914
+def attention_bleh(  # noqa: PLR0914
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -59,9 +63,20 @@ def attention_sage(  # noqa: PLR0914
     **kwargs: dict[str],
 ) -> torch.Tensor:
     old_sageattn = sageattn_version[:2] in {"1.", "un"}
-    mask = kwargs.get("mask")
-    skip_reshape = kwargs.get("skip_reshape", False)
-    skip_output_reshape = kwargs.get("skip_output_reshape", False)
+    orig_attn_kwargs = {
+        k: kwargs.pop(k)
+        for k in ("mask", "skip_reshape", "skip_output_reshape", "attn_precision")
+        if k in kwargs.copy()
+    }
+    bleh_kwargs = {
+        k: kwargs.pop(k)
+        for k in kwargs.copy()
+        if k.startswith("sm_scale_")
+        or k in {"q_multiplier", "k_multiplier", "v_multiplier", "output_multiplier"}
+    }
+    mask = orig_attn_kwargs.get("mask")
+    skip_reshape = orig_attn_kwargs.get("skip_reshape", False)
+    skip_output_reshape = orig_attn_kwargs.get("skip_output_reshape", False)
     batch = q.shape[0]
     dim_head = q.shape[-1] // (1 if skip_reshape else heads)
     enabled = sageattn_allow_head_sizes is None or dim_head in sageattn_allow_head_sizes
@@ -69,15 +84,11 @@ def attention_sage(  # noqa: PLR0914
         enabled = all(t.shape == q.shape for t in (k, v))
     if sageattn_verbose:
         print(
-            f"\n>> SAGE({enabled}): reshape={not skip_reshape}, output_reshape={not skip_output_reshape}, dim_head={q.shape[-1]}, heads={heads}, adj_heads={dim_head}, q={q.shape}, k={k.shape}, v={v.shape}, args: {kwargs}\n",
+            f"\n>> SAGE({enabled}): reshape={not skip_reshape}, output_reshape={not skip_output_reshape}, dim_head={q.shape[-1]}, heads={heads}, adj_heads={dim_head}, q={q.shape}, k={k.shape}, v={v.shape}, orig_attn_args={orig_attn_kwargs}, args: {kwargs}\n",
         )
+
     if not enabled:
-        filtered_kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k in {"mask", "skip_reshape", "skip_output_reshape", "attn_precision"}
-        }
-        return orig_attention(q, k, v, heads, **filtered_kwargs)
+        return orig_attention(q, k, v, heads, **orig_attn_kwargs)
     tensor_layout = kwargs.pop("tensor_layout", None)
     if old_sageattn:
         tensor_layout = "HND"
@@ -107,30 +118,27 @@ def attention_sage(  # noqa: PLR0914
             do_transpose = skip_output_reshape
     if not old_sageattn:
         kwargs["tensor_layout"] = tensor_layout
-    sm_scale_hd = kwargs.pop(f"sm_scale_{dim_head}", None)
+    sm_scale_hd = bleh_kwargs.pop(f"sm_scale_{dim_head}", None)
     if sm_scale_hd is not None:
         kwargs["sm_scale"] = sm_scale_hd
-    q_multiplier = kwargs.pop("q_multiplier", 1.0)
-    k_multiplier = kwargs.pop("k_multiplier", 1.0)
-    v_multiplier = kwargs.pop("v_multiplier", 1.0)
-    output_multiplier = kwargs.pop("output_multiplier", 1.0)
+    q_multiplier = bleh_kwargs.get("q_multiplier", 1.0)
+    k_multiplier = bleh_kwargs.get("k_multiplier", 1.0)
+    v_multiplier = bleh_kwargs.get("v_multiplier", 1.0)
+    output_multiplier = bleh_kwargs.get("output_multiplier", 1.0)
     if q_multiplier != 1.0:
         q = q * q_multiplier
     if k_multiplier != 1.0:
         k = k * k_multiplier
     if v_multiplier != 1.0:
         v = v * v_multiplier
-    result = sageattn_function(
-        q,
-        k,
-        v,
-        is_causal=False,
-        attn_mask=mask,
-        dropout_p=0.0,
-        **kwargs,
+    kwargs = {"is_causal": False, "dropout_p": 0.0, "attn_mask": mask} | kwargs
+    result = (
+        torch.zeros_like(q)
+        if output_multiplier == 0
+        else sageattn_function(q, k, v, **kwargs)
     )
-    if output_multiplier != 1.0:
-        result = result * output_multiplier
+    if output_multiplier not in {0, 1}:
+        result *= output_multiplier
     if do_transpose:
         result = result.transpose(1, 2)
     if not skip_output_reshape:
@@ -151,28 +159,37 @@ def copy_funattrs(fun, dest=None):
     return dest
 
 
-def make_sageattn_wrapper(
+def make_attn_wrapper(
     *,
     orig_attn,
     sageattn_function: str = "sageattn",
     **kwargs: dict,
 ):
     outer_kwargs = kwargs
-    sageattn_function = getattr(sageattention, sageattn_function)
+    if sageattn_function.startswith("sparge") and spas_sage_attn is None:
+        raise ValueError(
+            "SpargeAttention is not available, make sure you have the spas_sage_attn Python package installed",
+        )
+    if sageattn_function == "sparge":
+        sageattn_function = spas_sage_attn.spas_sage2_attn_meansim_cuda
+    elif sageattn_function == "sparge1":
+        sageattn_function = spas_sage_attn.spas_sage_attn_meansim_cuda
+    else:
+        sageattn_function = getattr(sageattention, sageattn_function)
 
     def attn(
         *args: list,
-        _sage_outer_kwargs=outer_kwargs,
-        _sage_orig_attention=orig_attn,
-        _sage_sageattn_function=sageattn_function,
-        _sage_attn=attention_sage,
+        _bleh_outer_kwargs=outer_kwargs,
+        _bleh_orig_attention=orig_attn,
+        _bleh_attn_function=sageattn_function,
+        _bleh_attn=attention_bleh,
         **kwargs: dict,
     ) -> torch.Tensor:
-        return _sage_attn(
+        return _bleh_attn(
             *args,
-            orig_attention=_sage_orig_attention,
-            sageattn_function=_sage_sageattn_function,
-            **_sage_outer_kwargs,
+            orig_attention=_bleh_orig_attention,
+            sageattn_function=_bleh_attn_function,
+            **_bleh_outer_kwargs,
             **kwargs,
         )
 
@@ -188,7 +205,7 @@ def sageattn_context(
         yield None
         return
     orig_attn = copy_funattrs(comfyattn.optimized_attention)
-    attn = make_sageattn_wrapper(orig_attn=orig_attn, **kwargs)
+    attn = make_attn_wrapper(orig_attn=orig_attn, **kwargs)
     try:
         copy_funattrs(attn, comfyattn.optimized_attention)
         yield None
@@ -259,7 +276,7 @@ class BlehGlobalSageAttention:
             )
         if not cls.orig_attn:
             cls.orig_attn = copy_funattrs(comfyattn.optimized_attention)
-        attn = make_sageattn_wrapper(
+        attn = make_attn_wrapper(
             orig_attn=cls.orig_attn,
             **get_yaml_parameters(yaml_parameters),
         )

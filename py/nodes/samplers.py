@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import math
 import random
 from copy import deepcopy
-from functools import partial
+from functools import partial, update_wrapper
 from os import environ
 from typing import Any, Callable, NamedTuple
 
@@ -141,20 +142,19 @@ class BlehForceSeedSampler:
 
     FUNCTION = "go"
 
-    def go(
-        self,
-        sampler: object,
-        seed_offset: int | None = 1,
-    ) -> tuple[KSAMPLER, SamplerChain]:
+    def go(self, sampler: object, seed_offset: int | None = 1) -> tuple[KSAMPLER]:
         return (
             KSAMPLER(
-                self.sampler_function,
-                extra_options=sampler.extra_options
-                | {
-                    "bleh_wrapped_sampler": sampler,
-                    "bleh_seed_offset": seed_offset,
-                },
-                inpaint_options=sampler.inpaint_options | {},
+                update_wrapper(
+                    partial(
+                        self.sampler_function,
+                        bleh_wrapped_sampler=sampler,
+                        bleh_seed_offset=seed_offset,
+                    ),
+                    sampler.sampler_function,
+                ),
+                extra_options=sampler.extra_options.copy(),
+                inpaint_options=sampler.inpaint_options.copy(),
             ),
         )
 
@@ -325,3 +325,112 @@ class BlehSetSamplerPreset:
         )
         BLEH_PRESET[preset] = (deepcopy(sampler), sigmas)
         return (any_input,)
+
+
+class BlehCFGInitSampler:
+    DESCRIPTION = "Sampler wrapper that allows skipping some number of initial steps, similar to CFGZeroStar zero-init."
+    RETURN_TYPES = ("SAMPLER",)
+    CATEGORY = "sampling/custom_sampling/samplers"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sampler": (
+                    "SAMPLER",
+                    {
+                        "tooltip": "Connect the sampler you want to wrap here. It will be called to sample as normal after the configured number of skipped steps.",
+                    },
+                ),
+                "steps": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 9999.0,
+                        "tooltip": "Number of steps to skip before sampling. You can use a fractional value here, but it may not work well. Whole skipped steps do not require a model call.",
+                    },
+                ),
+                "mode": (
+                    ("zero", "afs", "afs_flow_hack", "scale_down"),
+                    {
+                        "default": "zero",
+                        "tooltip": "zero: Works like CFGZeroStar zero init (just skips steps).\nafs: Analytical first step mode. A method of scaling down the initial noise to match skipped steps.\nafs_hack: A version of AFS mode that may work better for flow models.\nscale_down: The simplest approach to scaling down the latent to match the skipped steps.",
+                    },
+                ),
+            },
+        }
+
+    FUNCTION = "go"
+
+    def go(
+        self,
+        *,
+        sampler: object,
+        steps: float,
+        mode: str,
+    ) -> tuple[KSAMPLER]:
+        if steps == 0:
+            return (sampler,)
+        sampler_function = update_wrapper(
+            partial(
+                self.sampler_function,
+                bleh_ci_wrapped_sampler=sampler,
+                bleh_ci_mode=mode,
+                bleh_ci_steps=steps,
+            ),
+            sampler.sampler_function,
+        )
+        return (
+            KSAMPLER(
+                sampler_function,
+                extra_options=sampler.extra_options.copy(),
+                inpaint_options=sampler.inpaint_options.copy(),
+            ),
+        )
+
+    @staticmethod
+    def sampler_function(
+        model: object,
+        x: torch.Tensor,
+        sigmas: torch.Tensor,
+        *args: list[Any],
+        extra_args: dict[str, Any] | None = None,
+        bleh_ci_wrapped_sampler: object | None = None,
+        bleh_ci_mode: str = "zero",
+        bleh_ci_steps: float = 0,
+        **kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        if not bleh_ci_wrapped_sampler:
+            raise ValueError("Wrapped sampler missing!")
+        sigmas = sigmas.clone()
+        whole_steps = int(bleh_ci_steps)
+        steps = math.ceil(bleh_ci_steps)
+        step_fraction = bleh_ci_steps - whole_steps
+        for idx in range(steps if bleh_ci_mode != "zero" else 0):
+            sigma, sigma_next = sigmas[idx : idx + 2]
+            dt = sigma_next - sigma
+            if idx == whole_steps:
+                dt *= step_fraction
+            # From https://arxiv.org/abs/2210.05475
+            if bleh_ci_mode == "afs":
+                d = x / (1.0 + sigma**2) ** 0.5
+            elif bleh_ci_mode == "afs_flow_hack":
+                d = x / ((1.0 + (sigma * 10.0) ** 2) ** 0.5) / 10.0
+            elif bleh_ci_mode == "scale_down":
+                d = x / sigma
+            else:
+                raise ValueError("Bad CFG init mode")
+            x = x + d * dt  # noqa: PLR6104
+
+        if steps > 0 and step_fraction != 0:
+            sigmas[whole_steps] += (sigmas[steps] - sigmas[whole_steps]) * step_fraction
+
+        return bleh_ci_wrapped_sampler.sampler_function(
+            model,
+            x,
+            sigmas[whole_steps:],
+            *args,
+            extra_args=extra_args,
+            **kwargs,
+        )

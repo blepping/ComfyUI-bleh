@@ -197,6 +197,7 @@ If you run into custom nodes that don't seem to be honoring SageAttention (you c
 
 **Note:** Requires manually installing SageAttention into your Python environment. Should work with SageAttention 1.0 and 2.0.x (2.0.x currently requires CUDA 8+). Link: https://github.com/thu-ml/SageAttention
 
+This also supports SpargeAttention (only in simple usage mode) if you have it installed, although I personally haven't seen it outperform Sage2. You can use this by setting `sageattn_function` to `sparge` or `sparge1` (for the SageAttention1-based version) in the YAML options. It is also possible to pass the `cdfthreshd` and `simthreshd1` parameters this way. See: https://github.com/thu-ml/SpargeAttn
 
 ### BlehGlobalSageAttention
 
@@ -343,3 +344,5 @@ Also may be an item from [Filters](#filters).
 Many latent blending and scaling and filter functions based on implementation from https://github.com/WASasquatch/FreeU_Advanced - thanks!
 
 TAE video model support based on code from https://github.com/madebyollin/taehv/.
+
+AFS (analytical first step) formula from https://arxiv.org/abs/2210.05475

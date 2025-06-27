@@ -11,6 +11,8 @@ from . import (
     taevid,
 )
 
+_blepping_integrations = None
+
 NODE_CLASS_MAPPINGS = {
     "BlehBlockCFG": blockCFG.BlockCFGBleh,
     "BlehBlockOps": ops.BlehBlockOps,
@@ -21,6 +23,7 @@ NODE_CLASS_MAPPINGS = {
     "BlehGlobalSageAttention": sageAttention.BlehGlobalSageAttention,
     "BlehHyperTile": hyperTile.HyperTileBleh,
     "BlehInsaneChainSampler": samplers.BlehInsaneChainSampler,
+    "BlehCFGInitSampler": samplers.BlehCFGInitSampler,
     "BlehLatentOps": ops.BlehLatentOps,
     "BlehLatentScaleBy": ops.BlehLatentScaleBy,
     "BlehLatentBlend": ops.BlehLatentBlend,

@@ -173,7 +173,7 @@ class FallbackPreviewerModel(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.lin(x.movedim(1, -1)).movedim(-1, 1)
         x = self.upsample(x).movedim(1, -1)
-        return x.add_(1.0).mul_(127.5).clamp_(0.0, 255.0)
+        return x.add_(1.0).clamp_(0.0, 2.0).mul_(127.5).round_()
 
 
 class ACEStepsPreviewerModel(torch.nn.Module):
@@ -458,7 +458,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
             height,
         )
         return (
-            decoded.mul_(255.0).round_().clamp_(min=0, max=255.0).detach(),
+            decoded.clamp_(0.0, 1.0).mul_(255.0).round_().detach(),
             cols,
             rows,
         )
@@ -479,8 +479,9 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 self.previewer_model.decode(x0)
                 .movedim(1, -1)
                 .add_(1.0)
+                .clamp_(0.0, 2.0)
                 .mul_(127.5)
-                .clamp_(min=0, max=255.0)
+                .round_()
                 .detach()
             ),
             cols,
