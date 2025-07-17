@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-bleh"
+description = "Better TAESD previews, BlehHyperTile."
+version = "1.0.0"
+license = "LICENSE"
+
+[project.urls]
+Repository = "https://github.com/blepping/ComfyUI-bleh"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "ComfyUI-bleh"
+Icon = ""
