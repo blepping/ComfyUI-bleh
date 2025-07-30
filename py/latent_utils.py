@@ -50,6 +50,27 @@ if USE_ORIG_NORMALIZE:
     normalize = normalize_orig
 
 
+def normalize_to_scale(
+    latent: torch.Tensor,
+    target_min: float,
+    target_max: float,
+    *,
+    dim=(-3, -2, -1),
+    eps: float = 1e-07,
+) -> torch.Tensor:
+    min_val, max_val = (
+        latent.amin(dim=dim, keepdim=True),
+        latent.amax(dim=dim, keepdim=True),
+    )
+    normalized = latent - min_val
+    normalized /= (max_val - min_val).add_(eps)
+    return (
+        normalized.mul_(target_max - target_min)
+        .add_(target_min)
+        .clamp_(target_min, target_max)
+    )
+
+
 def hslerp(a, b, t):
     if a.shape != b.shape:
         raise ValueError("Input tensors a and b must have the same shape.")
@@ -812,6 +833,14 @@ BLENDING_MODES = {
         prob_blend_smoothed,
         kernel_size=9,
         sigma=3.0,
+    ),
+    "probinject": BlendMode(
+        lambda a, b, t, **kwargs: prob_blend(torch.zeros_like(b), b, t, **kwargs).add_(
+            a,
+        ),
+    ),
+    "probsubtract_b": BlendMode(
+        lambda a, b, t, **kwargs: a - prob_blend(torch.zeros_like(b), b, t, **kwargs),
     ),
     "gradient": BlendMode(gradient_blend),
     # Adds tensor b to tensor a, scaled by t.
