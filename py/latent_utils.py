@@ -167,6 +167,7 @@ def altslerp(  # noqa: PLR0914
     v0: FloatTensor,
     v1: FloatTensor,
     t: float | FloatTensor,
+    *,
     dot_threshold=0.9995,
     dim=-1,
 ):
@@ -540,6 +541,263 @@ def lop_lerp(
     return (a_ratio - t.clamp(max=a_ratio)).mul(a).add_(b * (t * b_ratio))
 
 
+# # Thanks, ChatGPT though you did get the ratio reversed.
+def cosine_similarity_blend_chatgpt_orig(
+    b: torch.Tensor,
+    a: torch.Tensor,
+    ratio: float | torch.Tensor,
+    *,
+    dim: int = -1,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    a_n = a / (a.norm(dim=dim, keepdim=True).clamp_min(eps))
+    b_n = b / (b.norm(dim=dim, keepdim=True).clamp_min(eps))
+
+    c = torch.sum(a_n * b_n, dim=dim, keepdim=True)
+
+    s = 2 * ratio - 1
+    if not torch.is_tensor(s):
+        s = a.new_tensor(s)
+
+    a_ = 1 - c
+    alpha = a_ * (a_ - 2 * s**2)
+    beta = 2 * a_ * (c + s**2)
+    gamma = c**2 - s**2
+
+    disc = beta**2 - 4 * alpha * gamma
+
+    disc = disc.clamp_min(0.0)
+    sqrt_disc = torch.sqrt(disc)
+
+    lam1 = (-beta + sqrt_disc) / (2 * alpha).clamp_min(eps)
+    lam2 = (-beta - sqrt_disc) / (2 * alpha).clamp_min(eps)
+
+    lam = torch.where((lam1 >= 0) & (lam1 <= 1), lam1, lam2)
+    lam = torch.where((lam >= 0) & (lam <= 1), lam, ratio)
+
+    return torch.lerp(b, a, lam.expand_as(a))
+
+
+def cosine_similarity_blend_chatgpt(  # noqa: PLR0914
+    a: torch.Tensor,
+    b: torch.Tensor,
+    ratio: float,
+    *,
+    dim: int = -1,
+    eps: float = 1e-8,
+    small_angle: float = 1e-4,
+    opp_eps: float = 1e-6,
+) -> torch.Tensor:
+    # --- normalize directions ---
+    mag_a = a.norm(dim=dim, keepdim=True).clamp_min(eps)
+    mag_b = b.norm(dim=dim, keepdim=True).clamp_min(eps)
+    a_n = a / mag_a
+    b_n = b / mag_b
+
+    # cosine & angle between a and b
+    cos_ab = (a_n * b_n).sum(dim=dim, keepdim=True).clamp(-1.0, 1.0)
+    theta = torch.acos(cos_ab)
+
+    # map blend ratio -> fraction along the arc
+    # we want angle from a -> out = theta * t
+    t = ratio if torch.is_tensor(ratio) else a.new_tensor(ratio)
+
+    # handle exact-opposite case: fallback to lerp then renorm
+    opp_mask = torch.abs(cos_ab + 1) < opp_eps
+    if opp_mask.any():
+        # simple normalized lerp + renormalize
+        lerp_dir = (1 - t) * a_n + t * b_n
+        lerp_dir /= lerp_dir.norm(dim=dim, keepdim=True).clamp_min(eps)
+        # magnitude later will apply
+        a_n = torch.where(opp_mask, lerp_dir, a_n)
+        b_n = torch.where(opp_mask, b_n, b_n)  # no-op but keeps shapes aligned
+        theta = torch.where(
+            opp_mask,
+            torch.acos((a_n * b_n).sum(dim=dim, keepdim=True)),
+            theta,
+        )
+
+    # for very small angles, do lerp+renormalize
+    lerp_mask = theta < small_angle
+    if lerp_mask.any():
+        lerp_dir = (1 - t) * a_n + t * b_n
+        lerp_dir /= lerp_dir.norm(dim=dim, keepdim=True).clamp_min(eps)
+        # override only where theta is small
+        a_n = torch.where(lerp_mask, lerp_dir, a_n)
+        b_n = torch.where(lerp_mask, b_n, b_n)
+        cos_ab = (a_n * b_n).sum(dim=dim, keepdim=True).clamp(-1, 1)
+        theta = torch.acos(cos_ab)
+
+    # now true SLERP coefficients
+    sin_theta = torch.sin(theta).clamp_min(eps)
+    coef_a = torch.sin((1 - t) * theta) / sin_theta
+    coef_b = torch.sin(t * theta) / sin_theta
+
+    dir_out = coef_a * a_n + coef_b * b_n
+
+    # --- geometric magnitude interpolation ---
+    log_a = torch.log(mag_a)
+    log_b = torch.log(mag_b)
+    log_out = (1 - t) * log_a + t * log_b
+    mag_out = torch.exp(log_out)
+
+    return dir_out * mag_out
+
+
+def cosine_similarity_blend_deepseek(  # noqa: PLR0914
+    a: torch.Tensor,
+    b: torch.Tensor,
+    ratio: float,
+    *,
+    dim: int = -1,
+    eps=1e-08,
+    threshold=1e-06,
+) -> torch.Tensor:
+    if not torch.is_tensor(ratio):
+        ratio = a.new_tensor(ratio)
+
+    # Compute magnitudes of a and b along the specified dimension
+    mag_a = torch.norm(a, p=2, dim=dim, keepdim=True).add_(eps)
+    mag_b = torch.norm(b, p=2, dim=dim, keepdim=True).add_(eps)
+
+    # Avoid division by zero during normalization
+    a_norm = a / mag_a
+    b_norm = b / mag_b
+
+    # Compute cosine similarity (dot product of normalized vectors)
+    d = (a_norm * b_norm).sum(dim=dim, keepdim=True).clamp_(-1.0, 1.0)
+
+    # Compute angle between a_norm and b_norm
+    theta = torch.acos(d)
+
+    # Calculate desired cosine similarity with b (s_b) from blend ratio
+    s_b = (2.0 * ratio - 1.0).clamp_(-1.0, 1.0)
+
+    # Compute angle from result to b based on s_b
+    angle_from_b = torch.acos(s_b)
+
+    # Calculate interpolation parameter t_val
+    t_val = (1.0 - angle_from_b / theta).clamp_(0.0, 1.0)
+
+    # Precompute sin_theta for slerp
+    sin_theta = torch.sin(theta)
+
+    # Linear interpolation fallback for small sin_theta
+    linear_part_norm = torch.lerp(a_norm, b_norm, t_val)
+    # linear_part_norm = (1.0 - t_val) * a_norm + t_val * b_norm
+
+    # Slerp computation
+    sin_t_theta = torch.sin(t_val * theta)
+    sin_comp_theta = torch.sin((1.0 - t_val) * theta)
+    slerp_denom = sin_theta + eps  # Avoid division by zero
+    slerp_part_norm = (sin_comp_theta / slerp_denom) * a_norm + (
+        sin_t_theta / slerp_denom
+    ) * b_norm
+
+    # Choose slerp unless sin_theta is too small (use linear then)
+    v_norm = torch.where(sin_theta < threshold, linear_part_norm, slerp_part_norm)
+
+    # Linearly interpolate magnitude
+    mag = torch.lerp(mag_a, mag_b, ratio)
+
+    # Scale normalized vector by interpolated magnitude
+    return v_norm * mag
+
+
+DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND = "chatgpt"
+COSINE_SIMILARITY_BLEND_BACKENDS = {
+    "altslerp": altslerp,
+    "deepseek": cosine_similarity_blend_deepseek,
+    "chatgpt": cosine_similarity_blend_chatgpt,
+    "chatgpt_orig": cosine_similarity_blend_chatgpt_orig,
+}
+
+
+def cosine_similarity_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *args: list,
+    backend=DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND,
+    **kwargs: dict,
+) -> torch.Tensor:
+    fun = COSINE_SIMILARITY_BLEND_BACKENDS.get(backend)
+    if fun is None:
+        errstr = f"Bad cosine similarity blend backend {backend}, must be one of {tuple(COSINE_SIMILARITY_BLEND_BACKENDS)}"
+        raise ValueError(errstr)
+    return fun(a, b, t, *args, **kwargs)
+
+
+def cosine_similarity_blend_avg(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    backend=DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND,
+    dims=(-1, -2),
+) -> torch.Tensor:
+    blend_fun = partial(cosine_similarity_blend, backend=backend)
+    multiplier = 1.0 / len(dims)
+    result = None
+    for dim in dims:
+        curr_result = blend_fun(a, b, t, dim=dim).mul_(multiplier)
+        result = curr_result if result is None else result.add_(curr_result)
+    return result
+
+
+def cosine_similarity_blend_flat(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    start_dim=0,
+    end_dim=1,
+    backend=DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND,
+) -> torch.Tensor:
+    if a.shape != b.shape:
+        raise ValueError("Tensor shape mismatch, a and b must be the same shape")
+    if start_dim < 0:
+        start_dim = a.ndim + start_dim
+    if end_dim < 0:
+        end_dim = a.ndim + end_dim
+    if start_dim < 0 or end_dim < 0 or start_dim >= a.ndim or end_dim >= a.ndim:
+        raise ValueError("Bad start/end_dim parameters")
+    orig_shape = a.shape
+    a = a.flatten(start_dim=start_dim, end_dim=end_dim)
+    b = b.flatten(start_dim=start_dim, end_dim=end_dim)
+    if isinstance(t, torch.Tensor) and t.ndim == len(orig_shape):
+        t = t.flatten(start_dim=start_dim, end_dim=end_dim)
+    return cosine_similarity_blend(a, b, t, dim=start_dim, backend=backend).reshape(
+        orig_shape,
+    )
+
+
+def blend_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    blend_mode_a: str = "lerp",
+    blend_mode_b="cosinesimilarity_flat_spatdims",
+    blend_blend: float | torch.Tensor = 0.5,
+    blend_mode_blend: str = "lerp",
+    blend_a_kwargs: dict | None = None,
+    blend_b_kwargs: dict | None = None,
+    blend_blend_kwargs: dict | None = None,
+) -> torch.Tensor:
+    fun_a = BLENDING_MODES[blend_mode_a]
+    fun_b = BLENDING_MODES[blend_mode_b]
+    fun_blend = BLENDING_MODES[blend_mode_blend]
+    if not torch.is_tensor(blend_blend):
+        blend_blend = a.new_tensor(blend_blend)
+    return fun_blend(
+        fun_a(a, b, t, **({} if blend_a_kwargs is None else blend_a_kwargs)),
+        fun_b(a, b, t, **({} if blend_b_kwargs is None else blend_b_kwargs)),
+        blend_blend,
+        **({} if blend_blend_kwargs is None else blend_blend_kwargs),
+    )
+
+
 class BlendMode:
     __slots__ = (
         "allow_scale",
@@ -570,6 +828,10 @@ class BlendMode:
         self.f_raw = f
         self.f = f if not kwargs else partial(f, **kwargs)
         self.f_kwargs = kwargs
+        if norm is True:
+            norm = normalize
+        elif norm is False:
+            norm = None
         self.norm = norm
         self.norm_dims = norm_dims
         self.rev = rev
@@ -668,9 +930,14 @@ class BlendingModes:
     def parse_value(self, k: str, v: str):
         k = k.strip().lower()
         v = v.strip()
-        vl = v.lower()
         if not v:
             raise ValueError("Empty value")
+        if len(v) > 1 and v[0] == "^":
+            literal_mode = True
+            v = v[1:]
+        else:
+            literal_mode = False
+        vl = v.lower()
         result = self._simple_value_map.get(vl, vl)
         if result is not vl:
             return result
@@ -688,15 +955,14 @@ class BlendingModes:
                     raise ValueError(errstr)
                 return result
             return float(v) if "." in v else int(v)
-        if k.startswith("blend"):
+        if not literal_mode and k.startswith("blend"):
             # It won't be a numeric value here.
             result = self.builtins.get(v)
             if result is None:
                 errstr = f"Unknown blend mode {v}"
                 raise ValueError(errstr)
             return result
-        errstr = f"Couldn't handle key {k}"
-        raise ValueError(errstr)
+        return v
 
     def parse_arg(self, s: str, idx: int) -> tuple:
         kv = s.split("=", 1)
@@ -848,13 +1114,30 @@ BLENDING_MODES = {
     "injecthalf": BlendMode(lambda a, b, t: (b * (t * 0.5)).add_(a)),
     "injectquarter": BlendMode(lambda a, b, t: (b * (t * 0.25)).add_(a)),
     "inject_difference": BlendMode(lambda a, b, t: (a - b).mul_(t).add_(a)),
+    "inject_copysign_a": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(a)),
+    "inject_copysign_b": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(b)),
+    "inject_avoidsign_a": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(a.neg())),
+    "inject_avoidsign_b": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(b.neg())),
     # Interpolates between tensors a and b using linear interpolation.
-    "lerp": BlendMode(lambda a, b, t: ((1 - t) * a).add_(t * b)),
+    # "lerp": BlendMode(lambda a, b, t: ((1.0 - t) * a).add_(t * b)),
+    "lerp": BlendMode(torch.lerp),
     "lerp050x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.5)),
     "lerp075x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.75)),
     "lerp110x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.1)),
     "lerp125x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.25)),
     "lerp150x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.5)),
+    "lerp_copysign_a": BlendMode(
+        lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(a),
+    ),
+    "lerp_copysign_b": BlendMode(
+        lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(b),
+    ),
+    "lerp_avoidsign_a": BlendMode(
+        lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(a.neg()),
+    ),
+    "lerp_avoidsign_b": BlendMode(
+        lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(b.neg()),
+    ),
     # Simulates a brightening effect by adding tensor b to tensor a, scaled by t.
     "lineardodge": BlendMode(lambda a, b, t: (b * t).add_(a)),
     "copysign": BlendMode(lambda a, b, _t: torch.copysign(a, b)),
@@ -895,6 +1178,34 @@ BLENDING_MODES = {
     "loplerp_a101": BlendMode(lop_lerp, a_ratio=1.01),
     "loplerp_a102": BlendMode(lop_lerp, a_ratio=1.02),
     "loplerp_a105": BlendMode(lop_lerp, a_ratio=1.05),
+    "cosinesimilarity": BlendMode(
+        cosine_similarity_blend,
+        backend=DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND,
+    ),
+    "cosinesimilarity_flat": BlendMode(
+        cosine_similarity_blend_flat,
+        start_dim=1,
+        end_dim=-1,
+        backend=DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND,
+    ),
+    "cosinesimilarity_flat_spatdims": BlendMode(
+        cosine_similarity_blend_flat,
+        start_dim=-2,
+        end_dim=-1,
+        backend=DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND,
+    ),
+    "cosinesimilarity_avg_spatdims": BlendMode(
+        cosine_similarity_blend_avg,
+        dims=(-1, -2),
+        backend=DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND,
+    ),
+    "hybrid_lerp_cosinesimilarity": BlendMode(
+        blend_blend,
+        blend_mode_a="lerp",
+        blend_mode_b="cosinesimilarity_flat_spatdims",
+        blend_mode_blend="lerp",
+        blend_blend=0.5,
+    ),
     # Simulates a brightening effect by dividing a by (1 - b) with a small epsilon to avoid division by zero.
     "colordodge": BlendMode(
         lambda a, b, _t: a / (1 - b + 1e-6),

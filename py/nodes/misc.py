@@ -1,12 +1,15 @@
 # ruff: noqa: TID252
 from __future__ import annotations
 
+import contextlib
 import operator
 import random
 from decimal import Decimal
+from functools import partial
 
 import torch
 from comfy import model_management
+from comfy.model_management import throw_exception_if_processing_interrupted
 
 from ..better_previews.previewer import ensure_previewer
 from ..latent_utils import normalize_to_scale
@@ -409,6 +412,76 @@ class BlehLatentAsImage:
             dim=(2, 3) if values_mode == "rescale_perchannel" else (1, 2, 3),
         )
         return (image,)
+
+
+class BlehModelPatchFastTerminate:
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "go"
+    CATEGORY = "hacks"
+    DESCRIPTION = "Patches a model to check if processing is interrupted at the start of every block. Makes interrupting generations more responsive on supported models (mainly useful for video models that might take 40+ second for a step). Should support most existing models."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"model": ("MODEL",)}}
+
+    @classmethod
+    def go(cls, model):
+        m = model.clone()
+
+        def wrap_transformer_forward(orig_forward, *args: list, **kwargs: dict):
+            throw_exception_if_processing_interrupted()
+            return orig_forward(*args, **kwargs)
+
+        found = 0
+        for bt in (
+            "blocks",
+            "single_blocks",
+            "double_blocks",
+            "transformer_blocks",
+            "vace_blocks",
+            "double_stream_blocks",
+            "single_stream_blocks",
+        ):
+            bn = 0
+            while True:
+                k = f"diffusion_model.{bt}.{bn}"
+                try:
+                    block = model.get_model_object(k)
+                except AttributeError:
+                    block = None
+                if block is None:
+                    k = f"diffusion_model.{bt}.block{bn}"
+                    with contextlib.suppress(AttributeError):
+                        block = model.get_model_object(k)
+                bn += 1
+                if block is None:
+                    break
+                orig_forward = getattr(block, "forward", None)
+                if orig_forward is None:
+                    continue
+                m.add_object_patch(
+                    f"{k}.forward",
+                    partial(wrap_transformer_forward, orig_forward),
+                )
+                found += 1
+
+        if found > 0:
+            # Appears to be a transformer-based model so we're done.
+            return (m,)
+
+        # Fallthough to handling normal SD models.
+        def input_block_patch(h, _transformer_options):
+            throw_exception_if_processing_interrupted()
+            return h
+
+        def output_block_patch(h, hsp, _transformer_options):
+            throw_exception_if_processing_interrupted()
+            return h, hsp
+
+        m.set_model_input_block_patch(input_block_patch)
+        m.set_model_output_block_patch(output_block_patch)
+
+        return (m,)
 
 
 # class BlehConditioningBlend:

@@ -32,6 +32,7 @@ NODE_CLASS_MAPPINGS = {
     "BlehLatentOps": ops.BlehLatentOps,
     "BlehLatentScaleBy": ops.BlehLatentScaleBy,
     "BlehModelPatchConditional": modelPatchConditional.ModelPatchConditionalNode,
+    "BlehModelPatchFastTerminate": misc.BlehModelPatchFastTerminate,
     "BlehPlug": misc.BlehPlug,
     "BlehRefinerAfter": refinerAfter.BlehRefinerAfter,
     "BlehSageAttentionSampler": sageAttention.BlehSageAttentionSampler,
