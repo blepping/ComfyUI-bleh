@@ -1,13 +1,18 @@
+# ruff: noqa: TID252
 from __future__ import annotations
 
+import contextlib
 import operator
 import random
 from decimal import Decimal
+from functools import partial
 
 import torch
 from comfy import model_management
+from comfy.model_management import throw_exception_if_processing_interrupted
 
-from ..better_previews.previewer import ensure_previewer  # noqa: TID252
+from ..better_previews.previewer import ensure_previewer
+from ..latent_utils import normalize_to_scale
 
 
 class DiscardPenultimateSigma:
@@ -318,3 +323,162 @@ class BlehEnsurePreviewer:
     def go(cls, *, any_input):
         ensure_previewer()
         return (any_input,)
+
+
+class BlehImageAsLatent:
+    DESCRIPTION = "This node allows you to rearrange an IMAGE to look like a LATENT. Can be useful if you want to apply some latent operations to an IMAGE. Can be reversed with the BlehLatentAsImage node."
+    FUNCTION = "go"
+    CATEGORY = "latent/advanced"
+    RETURN_TYPES = ("LATENT",)
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict:
+        return {
+            "required": {
+                "audio": ("IMAGE",),
+                "rescale": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "When enabled, will rescale the image values which usually are from 0 to 1 to -1 to 1.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def go(cls, *, image: torch.Tensor, rescale: bool) -> tuple:
+        image = image.to(device="cpu", dtype=torch.float32, copy=True)
+        if image.ndim == 3:
+            image = image[None]
+        elif image.ndim != 4:
+            raise ValueError("Unexpected number of dimensions in image")
+        image = image.movedim(-1, 1)
+        if rescale:
+            image = image.sub_(0.5).mul_(2.0)
+        return ({"samples": image},)
+
+
+class BlehLatentAsImage:
+    DESCRIPTION = "This node lets you rearrange a LATENT to look like an IMAGE. Note: It does not respect anything like masks or latent selection metadata (from nodes like LatentFromBatch) that might exist."
+    FUNCTION = "go"
+    CATEGORY = "latent/advanced"
+    RETURN_TYPES = ("IMAGE",)
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict:
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "values_mode": (
+                    ("rescale", "rescale_perchannel", "clamp"),
+                    {"default": "rescale"},
+                ),
+                "channels_into_batch": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "When enabled, will create a greyscale image for each latent channel.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def go(
+        cls,
+        *,
+        latent: dict,
+        values_mode: str,
+        channels_into_batch: bool,
+    ) -> tuple:
+        samples = latent["samples"]
+        if samples.ndim != 4:
+            raise ValueError("Expected a 4D latent but didn't get one")
+        if channels_into_batch:
+            samples = samples.reshape(-1, *samples.shape[2:]).unsqueeze(1)
+            samples = samples.expand(samples.shape[0], 3, *samples.shape[2:])
+        image = samples.movedim(1, -1).to(
+            device="cpu",
+            dtype=torch.float32,
+            copy=True,
+        )[..., :4]
+        if values_mode == "clamp":
+            return (image.clamp(0.0, 1.0),)
+        image = normalize_to_scale(
+            image,
+            0.0,
+            1.0,
+            dim=(2, 3) if values_mode == "rescale_perchannel" else (1, 2, 3),
+        )
+        return (image,)
+
+
+class BlehModelPatchFastTerminate:
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "go"
+    CATEGORY = "hacks"
+    DESCRIPTION = "Patches a model to check if processing is interrupted at the start of every block. Makes interrupting generations more responsive on supported models (mainly useful for video models that might take 40+ second for a step). Should support most existing models."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"model": ("MODEL",)}}
+
+    @classmethod
+    def go(cls, model):
+        m = model.clone()
+
+        def wrap_transformer_forward(orig_forward, *args: list, **kwargs: dict):
+            throw_exception_if_processing_interrupted()
+            return orig_forward(*args, **kwargs)
+
+        found = 0
+        for bt in (
+            "blocks",
+            "single_blocks",
+            "double_blocks",
+            "transformer_blocks",
+            "vace_blocks",
+            "double_stream_blocks",
+            "single_stream_blocks",
+        ):
+            bn = 0
+            while True:
+                k = f"diffusion_model.{bt}.{bn}"
+                try:
+                    block = model.get_model_object(k)
+                except AttributeError:
+                    block = None
+                if block is None:
+                    k = f"diffusion_model.{bt}.block{bn}"
+                    with contextlib.suppress(AttributeError):
+                        block = model.get_model_object(k)
+                bn += 1
+                if block is None:
+                    break
+                orig_forward = getattr(block, "forward", None)
+                if orig_forward is None:
+                    continue
+                m.add_object_patch(
+                    f"{k}.forward",
+                    partial(wrap_transformer_forward, orig_forward),
+                )
+                found += 1
+
+        if found > 0:
+            # Appears to be a transformer-based model so we're done.
+            return (m,)
+
+        # Fallthough to handling normal SD models.
+        def input_block_patch(h, _transformer_options):
+            throw_exception_if_processing_interrupted()
+            return h
+
+        def output_block_patch(h, hsp, _transformer_options):
+            throw_exception_if_processing_interrupted()
+            return h, hsp
+
+        m.set_model_input_block_patch(input_block_patch)
+        m.set_model_output_block_patch(output_block_patch)
+
+        return (m,)

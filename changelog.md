@@ -2,6 +2,20 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20250809
+
+This set of changes involves refactoring parts of the previewer. Please create an issue if you experience problems.
+
+* It's now possible to set the previewer dtype, see the `preview_dtype` setting. Note: Previews probably have been using float32 which is likely slower/more memory intensive than necessary. I'd recommend setting it to `vae`, `bfloat16` or `float16`.
+* The previewer can show a visual representation of ACE-Steps latents (audio model). If you don't like it then you can add `aceaudio` to the `blacklist_formats` list in your configuration.
+* You can set `throttle_secs_fallback` to use a different throttle setting for the fallback previewer (which includes stuff like the ACE-Steps previewer).
+* Basic support for SpargeAttention, see README and https://github.com/thu-ml/SpargeAttn
+* The blend mode system has been rewritten.
+* Added more blend modes. Partial list as I don't remember exactly what I did: probinject, probsubtract_b, inject_difference, inject_copysign_a, inject_copysign_b, inject_avoidsign_a, inject_avoidsign_b, slice_X (where x may be dimension, flat, etc), loplerp_X, cosinesimilarity (and variants - basically reinvented SLERP here), hybrid_lerp_cosinesimilarity, subtract_b, subtract_b_scaleup_a
+* Added a `BlehCFGInitSampler` sampler wrapper than can be used to skip steps like CFGZeroStar zero init, but without the cost of calling the model.
+* Added `BlehImageAsLatent` and `BlehLatentAsImage` nodes that let you convert IMAGE to LATENT vice versa. Note this is just to allow running image operations on latents or latent operations on images, it doesn't really convert anything.
+* Added a `BlehModelPatchFastTerminate` node that speeds up catching attempts to interrupt a generation. Mostly useful for video models where steps can take a very long time.
+
 ## 20250504
 
 This is a fairly large set of changes. Please create an issue if you experience problems.
