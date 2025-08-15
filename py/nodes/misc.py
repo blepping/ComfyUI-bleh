@@ -335,7 +335,7 @@ class BlehImageAsLatent:
     def INPUT_TYPES(cls) -> dict:
         return {
             "required": {
-                "audio": ("IMAGE",),
+                "image": ("IMAGE",),
                 "rescale": (
                     "BOOLEAN",
                     {
