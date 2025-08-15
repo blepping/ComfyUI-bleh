@@ -53,6 +53,7 @@ def attention_bleh(  # noqa: PLR0914
     k: torch.Tensor,
     v: torch.Tensor,
     heads: int,
+    mask=None,
     *,
     orig_attention: Callable,
     sageattn_allow_head_sizes: collections.abc.Collection
@@ -65,16 +66,16 @@ def attention_bleh(  # noqa: PLR0914
     old_sageattn = sageattn_version[:2] in {"1.", "un"}
     orig_attn_kwargs = {
         k: kwargs.pop(k)
-        for k in ("mask", "skip_reshape", "skip_output_reshape", "attn_precision")
+        for k in ("skip_reshape", "skip_output_reshape", "attn_precision")
         if k in kwargs.copy()
     }
+    orig_attn_kwargs["mask"] = mask
     bleh_kwargs = {
         k: kwargs.pop(k)
         for k in kwargs.copy()
         if k.startswith("sm_scale_")
         or k in {"q_multiplier", "k_multiplier", "v_multiplier", "output_multiplier"}
     }
-    mask = orig_attn_kwargs.get("mask")
     skip_reshape = orig_attn_kwargs.get("skip_reshape", False)
     skip_output_reshape = orig_attn_kwargs.get("skip_output_reshape", False)
     batch = q.shape[0]
