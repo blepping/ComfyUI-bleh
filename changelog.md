@@ -2,6 +2,11 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20250829
+
+* Added support for Wan 2.2 video previews.
+* The `BlehTAEVideoEncode` should work for encoding single images or numbers of frames that aren't a multiple of the video latent temporal compression size. The input will be padded with the last frame.
+
 ## 20250809
 
 This set of changes involves refactoring parts of the previewer. Please create an issue if you experience problems.

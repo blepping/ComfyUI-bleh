@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
+    from .base import VideoModelInfo
+
 F = torch.nn.functional
 
 
@@ -184,22 +186,26 @@ class TAEVidContext:
 class TAEVid(nn.Module):
     temporal_upscale_blocks = 2
     spatial_upscale_blocks = 3
+    _nf = (256, 128, 64, 64)
 
     def __init__(
         self,
         *,
         checkpoint_path: str | Path,
-        latent_channels: int,
+        vmi: VideoModelInfo,
         image_channels: int = 3,
         device="cpu",
         decoder_time_upscale=(True, True),
         decoder_space_upscale=(True, True, True),
     ):
+        n_f = self._nf
         super().__init__()
-        self.latent_channels = latent_channels
+        self.vmi = vmi
+        self.latent_channels = vmi.latent_format.latent_channels
         self.image_channels = image_channels
+        self.patch_size = vmi.patch_size
         self.encoder = nn.Sequential(
-            conv(image_channels, 64),
+            conv(image_channels * self.patch_size**2, 64),
             nn.ReLU(inplace=True),
             TPool(64, 2),
             conv(64, 64, stride=2, bias=False),
@@ -216,13 +222,12 @@ class TAEVid(nn.Module):
             MemBlock(64, 64),
             MemBlock(64, 64),
             MemBlock(64, 64),
-            conv(64, latent_channels),
+            conv(64, vmi.latent_format.latent_channels),
         )
-        n_f = (256, 128, 64, 64)
         self.frames_to_trim = 2 ** sum(decoder_time_upscale) - 1
         self.decoder = nn.Sequential(
             Clamp(),
-            conv(latent_channels, n_f[0]),
+            conv(vmi.latent_format.latent_channels, n_f[0]),
             nn.ReLU(inplace=True),
             MemBlock(n_f[0], n_f[0]),
             MemBlock(n_f[0], n_f[0]),
@@ -243,7 +248,7 @@ class TAEVid(nn.Module):
             TGrow(n_f[2], 2 if decoder_time_upscale[1] else 1),
             conv(n_f[2], n_f[3], bias=False),
             nn.ReLU(inplace=True),
-            conv(n_f[3], image_channels),
+            conv(n_f[3], image_channels * self.patch_size**2),
         )
         if checkpoint_path is None:
             return
@@ -299,9 +304,17 @@ class TAEVid(nn.Module):
         show_progress=False,
     ) -> torch.Tensor:
         model = self.decoder if decode else self.encoder
+        if not decode and self.vmi.patch_size > 1:
+            x = F.pixel_unshuffle(x, self.patch_size)
         if parallel:
-            return self.apply_parallel(x, model, show_progress=show_progress)
-        return TAEVidContext(model).apply(x, show_progress=show_progress)
+            result = self.apply_parallel(x, model, show_progress=show_progress)
+        else:
+            result = TAEVidContext(model).apply(x, show_progress=show_progress)
+        return (
+            result
+            if not decode or self.vmi.patch_size < 2
+            else F.pixel_shuffle(result, self.patch_size)
+        )
 
     def decode(self, *args: list, **kwargs: dict) -> torch.Tensor:
         return self.apply(*args, decode=True, **kwargs)[:, self.frames_to_trim :]

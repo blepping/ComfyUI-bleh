@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import math
 from time import time
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import folder_paths
 import latent_preview
 import torch
-from comfy import latent_formats
 from comfy.cli_args import LatentPreviewMethod
 from comfy.cli_args import args as comfy_args
 from comfy.model_management import device_supports_non_blocking, vae_dtype
@@ -16,12 +15,12 @@ from PIL import Image
 from tqdm import tqdm
 
 from ..settings import SETTINGS  # noqa: TID252
+from .base import VIDEO_FORMATS, VideoModelInfo
 from .tae_vid import TAEVid
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import numpy as np
+    from comfy import latent_formats
 
 _ORIG_PREVIEWER = latent_preview.TAESDPreviewerImpl
 _ORIG_GET_PREVIEWER = latent_preview.get_previewer
@@ -80,34 +79,6 @@ def normalize_to_scale(latent, target_min, target_max, *, dim=(-3, -2, -1)):
         .add_(target_min)
         .clamp_(target_min, target_max)
     )
-
-
-class VideoModelInfo(NamedTuple):
-    latent_format: latent_formats.LatentFormat
-    fps: int = 24
-    temporal_compression: int = 8
-    tae_model: str | Path | None = None
-
-
-VIDEO_FORMATS = {
-    "mochi": VideoModelInfo(
-        latent_formats.Mochi,
-        temporal_compression=6,
-        tae_model="taem1.pth",
-    ),
-    "hunyuanvideo": VideoModelInfo(
-        latent_formats.HunyuanVideo,
-        temporal_compression=4,
-        tae_model="taehv.pth",
-    ),
-    "cosmos1cv8x8x8": VideoModelInfo(latent_formats.Cosmos1CV8x8x8),
-    "wan21": VideoModelInfo(
-        latent_formats.Wan21,
-        fps=16,
-        temporal_compression=4,
-        tae_model="taew2_1.pth",
-    ),
-}
 
 
 class ImageWrapper:
@@ -653,7 +624,7 @@ def bleh_get_previewer(
             tae_model = (
                 TAEVid(
                     checkpoint_path=tae_model_path,
-                    latent_channels=latent_format.latent_channels,
+                    vmi=vid_info,
                     device=torch.device("cpu"),
                     decoder_time_upscale=decoder_time_upscale,
                 )

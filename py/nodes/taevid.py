@@ -1,8 +1,9 @@
 # ruff: noqa: TID252
 
-import torch  # noqa: I001
+import math
 
 import folder_paths
+import torch
 from comfy import model_management
 
 from ..better_previews.previewer import VIDEO_FORMATS, VideoModelInfo
@@ -17,7 +18,7 @@ class TAEVideoNodeBase:
     def INPUT_TYPES(cls) -> dict:
         return {
             "required": {
-                "latent_type": (("wan21", "hunyuanvideo", "mochi"),),
+                "latent_type": (("wan21", "wan22", "hunyuanvideo", "mochi"),),
                 "parallel_mode": (
                     "BOOLEAN",
                     {
@@ -40,6 +41,8 @@ class TAEVideoNodeBase:
         if tae_model_path is None:
             if latent_type == "wan21":
                 model_src = "taew2_1.pth from https://github.com/madebyollin/taehv"
+            elif latent_type == "wan22":
+                model_src = "taew2_2.pth from https://github.com/madebyollin/taehv"
             elif latent_type == "hunyuanvideo":
                 model_src = "taehv.pth from https://github.com/madebyollin/taehv"
             else:
@@ -49,11 +52,7 @@ class TAEVideoNodeBase:
         device = model_management.vae_device()
         dtype = model_management.vae_dtype(device=device)
         return (
-            TAEVid(
-                checkpoint_path=tae_model_path,
-                latent_channels=vmi.latent_format.latent_channels,
-                device=device,
-            ).to(device),
+            TAEVid(checkpoint_path=tae_model_path, vmi=vmi, device=device).to(device),
             device,
             dtype,
             vmi,
@@ -115,10 +114,31 @@ class TAEVideoEncode(TAEVideoNodeBase):
     def go(cls, *, image: torch.Tensor, latent_type: str, parallel_mode: bool) -> tuple:
         model, device, dtype, vmi = cls.get_taevid_model(latent_type)
         image = image.detach().to(device=device, dtype=dtype, copy=True)
-        if image.ndim == 4:
+        if image.ndim < 5:
             image = image.unsqueeze(0)
+        if image.ndim < 5:
+            image = image.unsqueeze(0)
+        if image.ndim != 5:
+            raise ValueError("Unexpected input image dimensions")
+        frames = image.shape[1]
+        add_frames = (
+            math.ceil(frames / vmi.temporal_compression) * vmi.temporal_compression
+            - frames
+        )
+        if add_frames > 0:
+            image = torch.cat(
+                (
+                    image,
+                    image[:, frames - 1 :, ...].expand(
+                        image.shape[0],
+                        add_frames,
+                        *image.shape[2:],
+                    ),
+                ),
+                dim=1,
+            )
         latent = model.encode(
-            image.movedim(-1, 2),
+            image[..., :3].movedim(-1, 2),
             parallel=parallel_mode,
             show_progress=True,
         ).transpose(1, 2)

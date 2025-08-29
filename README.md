@@ -8,6 +8,7 @@ For recent user-visible changes, please see the [ChangeLog](changelog.md).
 
 * Better TAESD previews (see below).
 * Visual previews for some audio models (currently only ACE-Steps).
+* Multi-frame video previews for most common video models (Wan 2.2, 2.1, Hunyuan, etc). See [the section on video encode/decode](#blehtaevideoencode-and-blehtaevideodecode).
 * Allow setting seed, timestep range and step interval for HyperTile (look for the [`BlehHyperTile`](#blehhypertile) node).
 * Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the [`BlehDeepShrink`](#blehdeepshrink) node).
 * Allow discarding penultimate sigma (look for the `BlehDiscardPenultimateSigma` node). This can be useful if you find certain samplers are ruining your image by spewing a bunch of noise into it at the very end (usually only an issue with `dpm2 a` or SDE samplers).
@@ -284,6 +285,7 @@ Fast video latent encoding/decoding with models from madebyollin (same person th
 
 You will need to download the models and put them in `models/vae_approx`. Don't change the names.
 
+* **WAN 2.2**: https://github.com/madebyollin/taehv/blob/main/taew2_2.pth
 * **WAN 2.1**: https://github.com/madebyollin/taehv/blob/main/taew2_1.pth
 * **Hunyean**: https://github.com/madebyollin/taehv/blob/main/taehv.pth
 * **Mochi**: https://github.com/madebyollin/taem1/blob/main/taem1.pth
