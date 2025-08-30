@@ -285,7 +285,7 @@ Fast video latent encoding/decoding with models from madebyollin (same person th
 
 You will need to download the models and put them in `models/vae_approx`. Don't change the names.
 
-* **WAN 2.2**: https://github.com/madebyollin/taehv/blob/main/taew2_2.pth
+* **WAN 2.2**: https://github.com/madebyollin/taehv/blob/main/taew2_2.pth — **Note**: Confusingly, the Wan 2.2 14B models do _not_ use the Wan 2.2 latent format, they use 2.1. This is (as far as I know) only for use with the smaller 5B Wan 2.2 model.
 * **WAN 2.1**: https://github.com/madebyollin/taehv/blob/main/taew2_1.pth
 * **Hunyean**: https://github.com/madebyollin/taehv/blob/main/taehv.pth
 * **Mochi**: https://github.com/madebyollin/taem1/blob/main/taem1.pth
