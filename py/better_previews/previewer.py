@@ -119,6 +119,8 @@ class FallbackPreviewerModel(torch.nn.Module):
         upscale_mode: str = "bilinear",
     ):
         super().__init__()
+        self.dtype = dtype
+        self.device = device
         raw_factors = latent_format.latent_rgb_factors
         raw_bias = latent_format.latent_rgb_factors_bias
         factors = torch.tensor(raw_factors, device=device, dtype=dtype).transpose(0, 1)
@@ -651,10 +653,7 @@ def bleh_get_previewer(
                 latent_format=latent_format,
                 vid_info=vid_info,
             )
-    if format_name == "aceaudio" or (
-        preview_method == LatentPreviewMethod.Latent2RGB
-        and latent_format.latent_rgb_factors is not None
-    ):
+    if format_name == "aceaudio" or latent_format.latent_rgb_factors is not None:
         return BetterPreviewer(latent_format=latent_format)
     return orig_get_previewer()
 
