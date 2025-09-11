@@ -1610,10 +1610,8 @@ def biderp(samples, width, height, mode="bislerp", mode_h=None):  # noqa: PLR091
     if mode_h is None:
         mode_h = mode
 
-    derp_w, derp_h = (
-        BIDERP_MODES.get(mode, slerp_orig),
-        BIDERP_MODES.get(mode_h, slerp_orig),
-    )
+    derp_w = (BIDERP_MODES if ":" not in mode else BLENDING_MODES).get(mode, slerp_orig)
+    derp_h = (BIDERP_MODES if ":" not in mode_h else BLENDING_MODES).get(mode_h, slerp_orig)
 
     def generate_bilinear_data(length_old, length_new, device):
         coords_1 = torch.arange(length_old, dtype=torch.float32, device=device).reshape(
