@@ -67,15 +67,23 @@ def attention_bleh(  # noqa: PLR0914
     **kwargs: dict[str],
 ) -> torch.Tensor:
     old_sageattn = sageattn_version[:2] in {"1.", "un"}
+    orig_keys = tuple(kwargs)
     orig_attn_kwargs = {
         k: kwargs.pop(k)
-        for k in ("skip_reshape", "skip_output_reshape", "attn_precision")
-        if k in kwargs.copy()
+        for k in (
+            "skip_reshape",
+            "skip_output_reshape",
+            "attn_precision",
+            "transformer_options",
+            "_inside_attn_wrapper",
+        )
+        if k in orig_keys
     }
     orig_attn_kwargs["mask"] = mask
+    orig_keys = tuple(kwargs)
     bleh_kwargs = {
         k: kwargs.pop(k)
-        for k in kwargs.copy()
+        for k in orig_keys
         if k.startswith("sm_scale_")
         or k in {"q_multiplier", "k_multiplier", "v_multiplier", "output_multiplier"}
     }
