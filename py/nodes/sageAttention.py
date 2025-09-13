@@ -48,6 +48,9 @@ else:
     sageattn_version = "unknown"
 
 
+HAVE_ATTN_OVERRIDE = hasattr(comfyattn, "register_attention_function")
+
+
 def attention_bleh(  # noqa: PLR0914
     q: torch.Tensor,
     k: torch.Tensor,
@@ -178,40 +181,71 @@ def make_attn_wrapper(
     else:
         sageattn_function = getattr(sageattention, sageattn_function)
 
-    def attn(
-        *args: list,
-        _bleh_outer_kwargs=outer_kwargs,
-        _bleh_orig_attention=orig_attn,
-        _bleh_attn_function=sageattn_function,
-        _bleh_attn=attention_bleh,
-        **kwargs: dict,
-    ) -> torch.Tensor:
-        return _bleh_attn(
-            *args,
-            orig_attention=_bleh_orig_attention,
-            sageattn_function=_bleh_attn_function,
-            **_bleh_outer_kwargs,
-            **kwargs,
-        )
+    if HAVE_ATTN_OVERRIDE:
+
+        def attn(
+            comfy_orig_attn: Callable,
+            *args: list,
+            _bleh_outer_kwargs=outer_kwargs,
+            _bleh_orig_attention=orig_attn,
+            _bleh_attn_function=sageattn_function,
+            _bleh_attn=attention_bleh,
+            **kwargs: dict,
+        ) -> torch.Tensor:
+            return _bleh_attn(
+                *args,
+                orig_attention=_bleh_orig_attention or comfy_orig_attn,
+                sageattn_function=_bleh_attn_function,
+                **_bleh_outer_kwargs,
+                **kwargs,
+            )
+    else:
+
+        def attn(
+            *args: list,
+            _bleh_outer_kwargs=outer_kwargs,
+            _bleh_orig_attention=orig_attn,
+            _bleh_attn_function=sageattn_function,
+            _bleh_attn=attention_bleh,
+            **kwargs: dict,
+        ) -> torch.Tensor:
+            return _bleh_attn(
+                *args,
+                orig_attention=_bleh_orig_attention,
+                sageattn_function=_bleh_attn_function,
+                **_bleh_outer_kwargs,
+                **kwargs,
+            )
 
     return attn
 
 
-@contextlib.contextmanager
-def sageattn_context(
-    enabled: bool,
-    **kwargs: dict,
-):
-    if not enabled:
-        yield None
-        return
-    orig_attn = copy_funattrs(comfyattn.optimized_attention)
-    attn = make_attn_wrapper(orig_attn=orig_attn, **kwargs)
-    try:
-        copy_funattrs(attn, comfyattn.optimized_attention)
-        yield None
-    finally:
-        copy_funattrs(orig_attn, comfyattn.optimized_attention)
+if HAVE_ATTN_OVERRIDE:
+
+    @contextlib.contextmanager
+    def sageattn_context(
+        enabled: bool,
+        **kwargs: dict,
+    ):
+        yield make_attn_wrapper(orig_attn=None, **kwargs) if enabled else None
+
+else:
+
+    @contextlib.contextmanager
+    def sageattn_context(
+        enabled: bool,
+        **kwargs: dict,
+    ):
+        if not enabled:
+            yield None
+            return
+        orig_attn = copy_funattrs(comfyattn.optimized_attention)
+        attn = make_attn_wrapper(orig_attn=orig_attn, **kwargs)
+        try:
+            copy_funattrs(attn, comfyattn.optimized_attention)
+            yield None
+        finally:
+            copy_funattrs(orig_attn, comfyattn.optimized_attention)
 
 
 def get_yaml_parameters(yaml_parameters: str | None = None) -> dict:
@@ -266,6 +300,10 @@ class BlehGlobalSageAttention:
         enabled: bool,
         yaml_parameters: str | None = None,
     ) -> tuple:
+        if HAVE_ATTN_OVERRIDE:
+            raise RuntimeError(
+                "BlehGlobalAttention does not currently support the new ComfyUI attention changes."
+            )
         if not enabled:
             if cls.orig_attn is not None:
                 copy_funattrs(cls.orig_attn, comfyattn.optimized_attention)
@@ -285,6 +323,18 @@ class BlehGlobalSageAttention:
         return (model,)
 
 
+class BlehModelWrapper:
+    def __init__(self, model: object, model_call: Callable):
+        self.__bleh_model = model
+        self.__bleh_model_call = model_call
+
+    def __call__(self, *args, **kwargs) -> torch.Tensor:
+        return self.__bleh_model_call(self.__bleh_model, *args, **kwargs)
+
+    def __getattr__(self, k: str):
+        return getattr(self.__bleh_model, k)
+
+
 def sageattn_sampler(
     model: object,
     x: torch.Tensor,
@@ -301,27 +351,30 @@ def sageattn_sampler(
     )
     del ms
 
-    def model_wrapper(
+    def model_call(
+        model: object,
         x: torch.Tensor,
         sigma: torch.Tensor,
-        **extra_args: dict[str],
+        **kwargs: dict[str],
     ) -> torch.Tensor:
         sigma_float = float(sigma.max().detach().cpu())
         enabled = end_sigma <= sigma_float <= start_sigma
         with sageattn_context(
             enabled=enabled,
             **sageattn_kwargs,
-        ):
-            return model(x, sigma, **extra_args)
+        ) as attn_override:
+            if enabled and HAVE_ATTN_OVERRIDE:
+                model_options = kwargs.pop("model_options", {}).copy()
+                transformer_options = model_options.pop(
+                    "transformer_options", {}
+                ).copy()
+                transformer_options["optimized_attention_override"] = attn_override
+                model_options["transformer_options"] = transformer_options
+                kwargs["model_options"] = model_options
+            return model(x, sigma, **kwargs)
 
-    for k in (
-        "inner_model",
-        "sigmas",
-    ):
-        if hasattr(model, k):
-            setattr(model_wrapper, k, getattr(model, k))
     return sampler.sampler_function(
-        model_wrapper,
+        BlehModelWrapper(model, model_call),
         x,
         sigmas,
         **kwargs,
