@@ -155,7 +155,7 @@ def attention_bleh(  # noqa: PLR0914
         result = result.transpose(1, 2)
     if not skip_output_reshape:
         result = result.reshape(batch, -1, heads * dim_head)
-    return result
+    return result.contiguous()
 
 
 def copy_funattrs(fun, dest=None):
