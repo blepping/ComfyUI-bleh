@@ -38,6 +38,12 @@ betterTaesdPreviews:
     # Setting it to "vae" will use whatever dtype ComfyUI is set to use for VAE.
     preview_dtype: null
 
+    # Uses non-blocking transfers for previews when the device supports it.
+    # Not recommended as it is extremely likely to corrupt previews, especially if the previewer
+    # is relatively slow or the latent is large (video models, Chroma Radiance). However,
+    # it might decrease the performance impact of previewing.
+    preview_non_blocking: false
+
     # Allows skipping upscale layers in the TAESD model, may increase performance when previewing large images or batches.
     # May be set to -1 (conservative) or -2 (aggressive) to automatically calculate how many to skip. See README.md for details.
     skip_upscale_layers: 0

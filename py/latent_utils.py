@@ -5,13 +5,20 @@ from __future__ import annotations
 import math
 import os
 from functools import partial
-from typing import ClassVar
+from tokenize import triple_quoted
+from typing import TYPE_CHECKING, Any
 
 import kornia.filters as kf
 import numpy as np
 import torch
 import torch.nn.functional as nnf
 from torch import FloatTensor, LongTensor, fft
+from tqdm import tqdm
+
+from . import wavelet_functions as wavef
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 OVERRIDE_NO_SCALE = "COMFYUI_BLEH_OVERRIDE_NO_SCALE" in os.environ
 USE_ORIG_NORMALIZE = "COMFYUI_BLEH_ORIG_NORMALIZE" in os.environ
@@ -798,6 +805,323 @@ def blend_blend(
     )
 
 
+def ortho_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: torch.Tensor,
+    *,
+    blend_mode: str | Callable | None = None,
+    proj_scale: float = -1.0,
+    ortho_scale: float = 1.0,
+    start_dim: int = 1,
+    end_dim: int = -1,
+    rescale_limit: float = 0.0,
+    # a, b, blend or None
+    rescale_result_mode: str | None = None,
+    # When rescale_target mode is blend, will use blend_mode if None.
+    rescale_result_blend_mode: str | Callable | None = None,
+    # LERP if None.
+    dyn_result_blend_mode: str | Callable | None = None,
+    dyn_ortho_mode: bool = False,
+    dyn_min_scale: float = 0.0,
+    dyn_max_scale: float = 1.0,
+    # Can only be used when the flattened tensor has 4 dimensions left.
+    smooth_factor_kernel_size: int | tuple[int, int] = 0,
+    ortho_verbose: bool = False,
+    eps: float = 1e-06,
+) -> torch.Tensor:
+    orig_shape = a.shape
+    ndim = a.ndim
+    if start_dim < 0:
+        start_dim = max(0, min(ndim + start_dim, ndim - 1))
+    if end_dim < 0:
+        end_dim = max(0, min(ndim + end_dim, ndim - 1))
+    if start_dim > end_dim:
+        start_dim, end_dim = end_dim, start_dim
+    sync_t = t.ndim == ndim
+    if sync_t:
+        t = t.flatten(start_dim=start_dim, end_dim=end_dim)
+    a = a.flatten(start_dim=start_dim, end_dim=end_dim)
+    b = b.flatten(start_dim=start_dim, end_dim=end_dim)
+    if end_dim != ndim - 1:
+        a = a.movedim(start_dim, -1)
+        b = b.movedim(start_dim, -1)
+        if sync_t:
+            t = t.movedim(start_dim, -1)
+    if start_dim == 0:
+        a = a.unsqueeze(0)
+        b = b.unsqueeze(0)
+        if sync_t:
+            t = t.unsqueeze(0)
+    b_normed = b.norm(dim=-1, keepdim=True) if rescale_limit else None
+    dot_ba = (b * a).sum(dim=-1, keepdim=True)
+    dot_aa = (a**2).sum(dim=-1, keepdim=True)
+    proj = (dot_ba / (dot_aa + eps)) * a
+    proj *= proj_scale
+    b_ortho = proj.add_(b if ortho_scale == 1.0 else b * ortho_scale)
+    if b_normed is not None:
+        rescale_limit = abs(rescale_limit)
+        if rescale_limit == 1:
+            rescale_limit += eps
+        b_ortho_normed = b_ortho.norm(dim=-1, keepdim=True)
+        b_ortho_normed += eps
+        b_normed /= b_ortho_normed
+        b_normed = b_normed.clamp_(-rescale_limit, rescale_limit)
+        b_ortho *= b_normed
+    if blend_mode is None:
+
+        def blend_function(a, b, t):
+            return (b * t).add_(a)
+    else:
+        blend_function = (
+            BLENDING_MODES[blend_mode] if isinstance(blend_mode, str) else blend_mode
+        )
+    ortho_result = blend_function(a, b_ortho, t)
+    if rescale_result_mode == "a":
+        rescale_result_target = a
+    elif rescale_result_mode == "b":
+        rescale_result_target = b
+    elif rescale_result_mode == "blend":
+        rr_blend_function = (
+            blend_function
+            if rescale_result_blend_mode is None
+            else (
+                BLENDING_MODES[rescale_result_blend_mode]
+                if isinstance(rescale_result_blend_mode, str)
+                else rescale_result_blend_mode
+            )
+        )
+        rescale_result_target = rr_blend_function(a, b, t)
+    else:
+        rescale_result_target = None
+    if rescale_result_target is not None:
+        result_norm = ortho_result.norm(dim=-1, keepdim=True).add_(eps)
+        target_norm = rescale_result_target.norm(dim=-1, keepdim=True)
+        target_norm /= result_norm
+        ortho_result *= target_norm
+    if b_normed is not None and dyn_ortho_mode:
+        vanilla_result = (
+            rr_blend_function(a, b, t)
+            if rescale_result_mode != "blend"
+            else rescale_result_target
+        )
+        dyn_blend_function = (
+            torch.lerp
+            if dyn_result_blend_mode is None
+            else (
+                BLENDING_MODES[dyn_result_blend_mode]
+                if isinstance(dyn_result_blend_mode, str)
+                else dyn_result_blend_mode
+            )
+        )
+        ortho_factor = (
+            (1.0 - ((b_normed - 1.0) / (rescale_limit - 1.0)).clamp_(0.0, 1.0))
+            .add_(dyn_min_scale)
+            .mul_(dyn_max_scale - dyn_min_scale)
+        )
+        if smooth_factor_kernel_size != 0:
+            if ortho_factor.ndim < 4:
+                raise ValueError(
+                    f"Can't use smooth_factor_kernel_size when ortho_factor has less than 4 dimensions. It has shape: {ortho_factor.shape}",
+                )
+            ortho_factor = (
+                torch.nn.functional.avg_pool2d(
+                    ortho_factor.movedim(-1, -3),
+                    kernel_size=smooth_factor_kernel_size,
+                    stride=1,
+                    padding=1,
+                )
+                .movedim(-3, -1)
+                .clamp_(dyn_min_scale, dyn_max_scale)
+            )
+        ortho_result = dyn_blend_function(vanilla_result, ortho_result, ortho_factor)
+        if ortho_verbose:
+            tqdm.write(
+                f"ORTHO BLEND: b_norm min/max={b_normed.aminmax()}, avg: {ortho_factor.mean().item():.5f}, min: {ortho_factor.min().item():.5f}, max: {ortho_factor.max().item():.5f}",
+            )
+    if end_dim != ndim - 1:
+        ortho_result = ortho_result.movedim(-1, start_dim)
+    return ortho_result.reshape(orig_shape)
+
+
+class WaveletBlend:
+    wavelet: wavef.Wavelet | None = None
+    use_float64: bool = False
+
+    def __init__(
+        self,
+        *,
+        device: str | torch.device | None = None,
+        use_float64: bool = False,
+        **kwargs: dict,
+    ):
+        self.device = device
+        self.wavelet_kwargs = kwargs
+        self.use_float64 = use_float64
+
+    def get_wavelet(self, *, device: str | torch.device | None = None) -> wavef.Wavelet:
+        if self.wavelet is None:
+            self.wavelet = wavef.Wavelet(
+                device=device if device is not None else self.device,
+                **self.wavelet_kwargs,
+            ).to(dtype=torch.float64 if self.use_float64 else torch.float32)
+            self.device = device
+            return self.wavelet
+        if device is not None and self.wavelet.device != device:
+            self.wavelet = self.wavelet.to(device=device)
+            self.device = device
+        return self.wavelet
+
+    @staticmethod
+    def maybe_offset(
+        yl: torch.Tensor,
+        yh: Sequence[torch.Tensor],
+        offset_yl: float | torch.Tensor | None,
+        offset_yh: float | Sequence[float | Sequence[float]] | None,
+        *,
+        in_place: bool = False,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        if offset_yl in {None, 1.0} and offset_yh in {None, 1.0}:
+            return (yl, tuple(yh))
+        return wavef.wavelet_scaling(
+            yl,
+            yh,
+            yl_scale=offset_yl if offset_yl is not None else 1.0,
+            yh_scales=offset_yh,
+            in_place=in_place,
+        )
+
+    def wavelet_blend(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        t: float | torch.Tensor,
+        *,
+        blend_mode_yl: str | Callable = torch.lerp,
+        blend_mode_yh: str | Callable | None = None,
+        a_offset_yl: float | torch.Tensor | None = None,
+        a_offset_yh: float | Sequence[float | Sequence[float]] | None = None,
+        b_offset_yl: float | torch.Tensor | None = None,
+        b_offset_yh: float | Sequence[float | Sequence[float]] | None = None,
+        out_offset_yl: float | torch.Tensor | None = None,
+        out_offset_yh: float | Sequence[float | Sequence[float]] | None = None,
+        blend_yl_offset: float = 1.0,
+        blend_yh_offset: float | torch.Tensor = 1.0,
+        two_step_inverse: bool = False,
+        in_place_offset: bool = True,
+    ) -> torch.Tensor:
+        if isinstance(blend_mode_yl, str):
+            blend_mode_yl = BLENDING_MODES[blend_mode_yl]
+        if blend_mode_yh is None:
+            blend_mode_yh = blend_mode_yl
+        elif isinstance(blend_mode_yh, str):
+            blend_mode_yh = BLENDING_MODES[blend_mode_yh]
+        wavelet = self.get_wavelet(device=a.device)
+        dtype = a.dtype
+        if a.ndim != b.ndim:
+            raise ValueError(
+                f"Tensor a ndim ({a.ndim}) must match tensor b ndim ({b.ndim})"
+            )
+        orig_shape = a.shape
+        # FIXME: This reshaping logic is almost certainly not reliable.
+        if a.ndim > 4:
+            a = a.reshape(a.shape[0], -1, *a.shape[-2:])
+        if b.ndim > 4:
+            b = a.reshape(b.shape[0], -1, *b.shape[-2:])
+        a = a.to(dtype=torch.float64 if self.use_float64 else torch.float32)
+        b = b.to(a)
+        t = a.new_tensor(t) if not isinstance(t, torch.Tensor) else t.to(a)
+        if t.ndim > 4:
+            t = a.reshape(t.shape[0], -1, *t.shape[-2:])
+        aw_l, aw_h = self.maybe_offset(
+            *wavelet.forward(a),
+            a_offset_yl,
+            a_offset_yh,
+            in_place=in_place_offset,
+        )
+        bw_l, bw_h = self.maybe_offset(
+            *wavelet.forward(b),
+            b_offset_yl,
+            b_offset_yh,
+            in_place=in_place_offset,
+        )
+        blend_yl_offset = t if blend_yl_offset == 1 else t * blend_yl_offset
+        blend_yh_offset = t if blend_yh_offset == 1 else t * blend_yh_offset
+        outw_l, outw_h = self.maybe_offset(
+            *wavef.wavelet_blend(
+                (aw_l, aw_h),
+                (bw_l, bw_h),
+                yl_factor=blend_yl_offset,
+                yh_factor=blend_yh_offset,
+                blend_function=blend_mode_yl,
+                yh_blend_function=blend_mode_yh,
+            ),
+            offset_yl=out_offset_yl,
+            offset_yh=out_offset_yh,
+            in_place=in_place_offset,
+        )
+        result = wavelet.inverse(outw_l, outw_h, two_step_inverse=two_step_inverse)
+        result = result[tuple(slice(None, dsize) for dsize in a.shape)]
+        return result.to(dtype=dtype).reshape(orig_shape)
+
+
+WAVELET_BLEND_CACHE: dict[frozenset[tuple[str, Any]], WaveletBlend] = {}
+
+
+def wavelet_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    blend_mode_yl: str | Callable = torch.lerp,
+    blend_mode_yh: str | Callable | None = None,
+    **kwargs: dict[str, Any],
+) -> torch.Tensor:
+    if isinstance(blend_mode_yl, str):
+        blend_mode_yl = BLENDING_MODES[blend_mode_yl]
+    if blend_mode_yh is None:
+        blend_mode_yh = blend_mode_yl
+    _ = kwargs.pop("device", None)
+    wavelet_kwargs = {
+        k: kwargs.pop(k)
+        for k in (
+            "wave",
+            "level",
+            "mode",
+            "use_1d_dwt",
+            "use_dtcwt",
+            "biort",
+            "qshift",
+            "inv_wave",
+            "inv_mode",
+            "inv_biort",
+            "inv_qshift",
+            "two_step_inverse",
+            "use_float64",
+        )
+        if k in kwargs
+    }
+    cache_key = frozenset(
+        (
+            wavelet_kwargs
+            | {"blend_mode_yl": blend_mode_yl, "blend_mode_yh": blend_mode_yh}
+        ).items(),
+    )
+    print(f"\nWAVELET BLEND: cache key: {cache_key}")
+    wb = WAVELET_BLEND_CACHE.get(cache_key)
+    if wb is None:
+        wb = WaveletBlend(device=a.device, **wavelet_kwargs)
+        WAVELET_BLEND_CACHE[cache_key] = wb
+    return wb.wavelet_blend(
+        a,
+        b,
+        t,
+        blend_mode_yl=blend_mode_yl,
+        blend_mode_yh=blend_mode_yh,
+        **kwargs,
+    )
+
+
 class BlendMode:
     __slots__ = (
         "allow_scale",
@@ -805,24 +1129,32 @@ class BlendMode:
         "f_kwargs",
         "f_raw",
         "force_rescale",
+        "fork_rng",
+        "invert_scale",
         "norm",
         "norm_dims",
         "rescale_dims",
         "rev",
+        "scale_multiplier",
+        "visible",
     )
 
     class _Empty:
         pass
 
-    def __init__(  # noqa: PLR0917
+    def __init__(
         self,
         f,
         norm=None,
-        norm_dims=(-3, -2, -1),
-        rev=False,
-        allow_scale=True,
-        rescale_dims=(-3, -2, -1),
-        force_rescale=False,
+        norm_dims: tuple = (-3, -2, -1),
+        rev: bool = False,
+        allow_scale: bool = True,
+        rescale_dims: tuple = (-3, -2, -1),
+        force_rescale: bool = False,
+        fork_rng: bool = False,
+        invert_scale: float | None = None,
+        scale_multiplier: float = 1.0,
+        visible: bool = True,
         **kwargs: dict,
     ):
         self.f_raw = f
@@ -838,6 +1170,10 @@ class BlendMode:
         self.allow_scale = allow_scale
         self.rescale_dims = rescale_dims
         self.force_rescale = force_rescale
+        self.fork_rng = fork_rng
+        self.invert_scale = invert_scale
+        self.scale_multiplier = scale_multiplier
+        self.visible = visible
 
     def edited(
         self,
@@ -849,6 +1185,10 @@ class BlendMode:
         allow_scale=_Empty,
         rescale_dims=_Empty,
         force_rescale=_Empty,
+        fork_rng=_Empty,
+        invert_scale=_Empty,
+        scale_multiplier=_Empty,
+        visible=_Empty,
         preserve_kwargs=True,
         **kwargs: dict,
     ) -> object:
@@ -866,6 +1206,14 @@ class BlendMode:
             force_rescale=force_rescale
             if force_rescale is not empty
             else self.force_rescale,
+            fork_rng=fork_rng if fork_rng is not empty else self.fork_rng,
+            invert_scale=invert_scale
+            if invert_scale is not empty
+            else self.invert_scale,
+            scale_multiplier=scale_multiplier
+            if scale_multiplier is not empty
+            else self.scale_multiplier,
+            visible=visible if visible is not empty else self.visible,
             **kwargs,
         )
 
@@ -881,22 +1229,41 @@ class BlendMode:
         tmax = torch.amax(t, keepdim=True, dim=rescale_dims)
         return (t - tmin).div_(tmax - tmin).clamp_(0, 1), tmin, tmax
 
-    def __call__(self, a, b, t, *, norm_dims=_Empty) -> torch.Tensor:
+    def __call__(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        t: torch.Tensor | float,
+        *,
+        norm_dims=_Empty,
+    ) -> torch.Tensor:
         if not self.force_rescale:
             return self.__call__internal(a, b, t, norm_dims=norm_dims)
         a, amin, amax = self.rescale(a)
         b, bmin, bmax = self.rescale(b)
-        result = self.__call__internal(a, b, t, norm_dims=norm_dims)
+        with torch.random.fork_rng(devices=(a.device, b.device), enabled=self.fork_rng):
+            result = self.__call__internal(a, b, t, norm_dims=norm_dims)
         del a, b
         rmin, rmax = torch.lerp(amin, bmin, 0.5), torch.lerp(amax, bmax, 0.5)
         del amin, amax, bmin, bmax
         return result.mul_(rmax.sub_(rmin)).add_(rmin)
 
-    def __call__internal(self, a, b, t, *, norm_dims=_Empty) -> torch.Tensor:
+    def __call__internal(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        t: torch.Tensor | float,
+        *,
+        norm_dims=_Empty,
+    ) -> torch.Tensor:
         if not isinstance(t, torch.Tensor) and isinstance(a, torch.Tensor):
             t = a.new_full((1,), t)
         if self.rev:
             a, b = b, a
+        if self.invert_scale is not None:
+            t = self.invert_scale - t
+        if self.scale_multiplier != 1.0:
+            t = t * self.scale_multiplier
         if self.norm is None:
             return self.f(a, b, t)
         return self.norm(
@@ -907,11 +1274,36 @@ class BlendMode:
 
 
 class BlendingModes:
+    BLEH = True
+
     def __init__(self, builtins=None):
         self.builtins = {} if builtins is None else builtins
         self.cache = {}
 
-    def get(self, k: str, default=None):
+    def get_dict_key(self, k: dict):
+        ds = frozenset(k.items())
+        cached = self.cache.get(ds)
+        if cached is not None:
+            return cached
+        name = k.get("name")
+        if name is None:
+            raise ValueError(
+                "When passing a blend mode key as dict, a string 'name' key must exist."
+            )
+        name = name.strip()
+        base_bm = self.builtins.get(name)
+        if base_bm is None:
+            errstr = f"Unknown mode {name} for extended blend specification"
+            raise ValueError(errstr)
+        bm_kwargs = k.copy()
+        del bm_kwargs["name"]
+        bm = base_bm.edited(**bm_kwargs)
+        self.cache[k] = bm
+        return bm
+
+    def get(self, k: str | dict, default=None):
+        if isinstance(k, dict):
+            return self.get_dict_key(k)
         result = self.builtins.get(k)
         if result is not None:
             return result
@@ -995,16 +1387,16 @@ class BlendingModes:
         return bm
 
     def items(self):
-        return self.builtins.items()
+        return ((k, v) for k, v in self.builtins.items() if v.visible)
 
     def values(self):
-        return self.builtins.values()
+        return (v for v in self.builtins.values() if v.visible)
 
     def __contains__(self, k: str) -> bool:
         return self.get(k) is not None
 
     def __iter__(self):
-        return self.builtins.__iter__()
+        return (k for k, _v in self.items())
 
     keys = __iter__
 
@@ -1118,6 +1510,7 @@ BLENDING_MODES = {
     "inject_copysign_b": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(b)),
     "inject_avoidsign_a": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(a.neg())),
     "inject_avoidsign_b": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(b.neg())),
+    "cfg": BlendMode(lambda a, b, t: (a - b).mul_(t).add_(b)),
     # Interpolates between tensors a and b using linear interpolation.
     # "lerp": BlendMode(lambda a, b, t: ((1.0 - t) * a).add_(t * b)),
     "lerp": BlendMode(torch.lerp),
@@ -1251,6 +1644,10 @@ BLENDING_MODES = {
         normalize,
         allow_scale=False,
     ),
+    "multiply_by_b": BlendMode(
+        lambda a, b, _t: a * b,
+        allow_scale=False,
+    ),
     "overlay": BlendMode(
         lambda a, b, t: (2 * a * b + a**2 - 2 * a * b * a) * t
         if torch.all(b < 0.5)
@@ -1295,6 +1692,51 @@ BLENDING_MODES = {
         ),
         allow_scale=False,
         force_rescale=True,
+    ),
+    "wavelet_b_hi_100_lo_0": BlendMode(
+        f=wavelet_blend,
+        blend_yl_offset=0.0,
+        blend_yh_offset=1.0,
+        wave="db4",
+        level=8,
+    ),
+    "wavelet_b_hi_0_lo_100": BlendMode(
+        f=wavelet_blend,
+        blend_yl_offset=1.0,
+        blend_yh_offset=0.0,
+        wave="db4",
+        level=8,
+    ),
+    "ortho": BlendMode(ortho_blend),
+    "ortho_rescaled": BlendMode(ortho_blend, rescale_limit=2.0),
+    "ortho_rescaled_lerpish": BlendMode(
+        ortho_blend,
+        rescale_limit=2.0,
+        rescale_result_blend_mode="lerp",
+        rescale_result_mode="blend",
+    ),
+    "ortho_lerp": BlendMode(ortho_blend, blend_mode="lerp"),
+    "ortho_dyn_lerp": BlendMode(
+        ortho_blend,
+        blend_mode="lerp",
+        rescale_result_mode="blend",
+        rescale_limit=4.0,
+        dyn_ortho_mode=True,
+    ),
+    "ortho_dyn_lerp_inverted": BlendMode(
+        ortho_blend,
+        blend_mode="lerp",
+        rescale_result_mode="blend",
+        rescale_limit=2.0,
+        dyn_ortho_mode=True,
+        rev=True,
+        invert_scale=1.0,
+    ),
+    "ortho_lerp_rescaled": BlendMode(
+        ortho_blend,
+        blend_mode="lerp",
+        rescale_result_mode="blend",
+        rescale_limit=2.0,
     ),
 }
 
@@ -1611,7 +2053,9 @@ def biderp(samples, width, height, mode="bislerp", mode_h=None):  # noqa: PLR091
         mode_h = mode
 
     derp_w = (BIDERP_MODES if ":" not in mode else BLENDING_MODES).get(mode, slerp_orig)
-    derp_h = (BIDERP_MODES if ":" not in mode_h else BLENDING_MODES).get(mode_h, slerp_orig)
+    derp_h = (BIDERP_MODES if ":" not in mode_h else BLENDING_MODES).get(
+        mode_h, slerp_orig
+    )
 
     def generate_bilinear_data(length_old, length_new, device):
         coords_1 = torch.arange(length_old, dtype=torch.float32, device=device).reshape(

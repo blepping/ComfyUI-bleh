@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import operator
 import random
 from decimal import Decimal
@@ -11,7 +12,7 @@ import torch
 from comfy import model_management
 from comfy.model_management import throw_exception_if_processing_interrupted
 
-from ..better_previews.previewer import ensure_previewer
+from ..better_previews.previewer import PREVIEWER_STATE, ensure_previewer
 from ..latent_utils import normalize_to_scale
 
 
@@ -482,3 +483,159 @@ class BlehModelPatchFastTerminate:
         m.set_model_output_block_patch(output_block_patch)
 
         return (m,)
+
+
+class BlehModelProcessLatentIn:
+    DESCRIPTION = "Advanced node that can be used to scale a raw latent for model input. Generally only needed if you're doing something that bypasses the normal latent input mechanisms."
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "go"
+    CATEGORY = "latent/advanced"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict:
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "latent": ("LATENT",),
+            },
+        }
+
+    @classmethod
+    def go(cls, *, model, latent: dict) -> tuple[dict]:
+        latent_format = model.model.latent_format
+        samples = (
+            latent["samples"].detach().to(device="cpu", dtype=torch.float32, copy=True)
+        )
+        return (latent | {"samples": latent_format.process_in(samples)},)
+
+
+class BlehModelProcessLatentOut:
+    DESCRIPTION = "Advanced node that can be used to scale a latent to the correct range for output. Generally only needed if you're doing something that bypasses the normal latent output mechanisms."
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "go"
+    CATEGORY = "latent/advanced"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict:
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "latent": ("LATENT",),
+            },
+        }
+
+    @classmethod
+    def go(cls, *, model, latent: dict) -> tuple[dict]:
+        latent_format = model.model.latent_format
+        samples = (
+            latent["samples"].detach().to(device="cpu", dtype=torch.float32, copy=True)
+        )
+        return (latent | {"samples": latent_format.process_out(samples)},)
+
+
+class PreviewFixGuider:
+    def __init__(self, guider, *, fps_override: int | float | None = None):
+        self.__guider = guider
+        self.__fps_override = fps_override
+
+    def __getattr__(self, k):
+        return getattr(self.__guider, k)
+
+    def sample(self, noise, latent_image, *args, **kwargs):
+        latent_shapes = (
+            (tuple(latent_image.shape),)
+            if not latent_image.is_nested
+            else tuple(tuple(t.shape) for t in latent_image.unbind())
+        )
+        PREVIEWER_STATE.last_latent_shapes = latent_shapes
+        fps_override = self.__fps_override
+        if fps_override:
+            PREVIEWER_STATE.fps_override = fps_override
+        try:
+            return self.__guider.sample(noise, latent_image, *args, **kwargs)
+        finally:
+            PREVIEWER_STATE.last_latent_shapes = None
+            PREVIEWER_STATE.fps_override = None
+
+    # def sample(self, noise, latent_image, *args, **kwargs):
+    #     nest_index = self.__nest_index
+    #     orig_callback = kwargs.get("callback")
+    #     sample = partial(self.__guider.sample, noise, latent_image, *args)
+    #     if not (latent_image.is_nested and orig_callback is not None):
+    #         # Either not nested or no callback, so no need to fix previewing.
+    #         return sample(**kwargs)
+    #     latent_part_sizes = tuple(
+    #         t.shape if isinstance(t, torch.Tensor) and not t.is_nested else None
+    #         for t in latent_image.unbind()
+    #     )
+    #     if not (
+    #         len(latent_part_sizes) >= nest_index
+    #         and all(ps is not None for ps in latent_part_sizes)
+    #     ):
+    #         # Multiple levels of nesting not yet implemented.
+    #         return sample(**kwargs)
+    #     offset = 0
+    #     # ComfyUI preserves the batch dimension and smashes everything else together.
+    #     for ps in latent_part_sizes[:nest_index]:
+    #         offset += math.prod(ps[1:])
+    #     orig_shape = latent_part_sizes[nest_index]
+    #     orig_nelems = math.prod(orig_shape[1:])
+
+    #     def cb_wrapper(i, denoised, x, *args, **kwargs) -> None:
+    #         print(
+    #             f"\n\nCB SHAPES: {denoised.shape}, {x.shape}, orig {orig_shape}, orig elems {orig_nelems}",
+    #         )
+    #         denoised, x = (
+    #             t[:, :, offset : offset + orig_nelems].reshape(
+    #                 t.shape[0],
+    #                 *orig_shape[1:],
+    #             )
+    #             for t in (denoised, x)
+    #         )
+    #         print(
+    #             f"\n\nFIXED CB SHAPES: {denoised.shape}, {x.shape}",
+    #         )
+    #         return orig_callback(i, denoised, x, *args, **kwargs)
+
+    #     kwargs["callback"] = cb_wrapper
+    #     return sample(**kwargs)
+
+
+class BlehFixGuiderPreviewing:
+    DESCRIPTION = "Wraps a guider to give the Bleh previewing system a hint about the latent shapes. Only necessary for models like LTX-2 which use nested tensors."
+    FUNCTION = "go"
+    OUTPUT_NODE = False
+    CATEGORY = "hacks"
+
+    RETURN_TYPES = ("GUIDER",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "guider": ("GUIDER",),
+                "fps_override": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 9999.0,
+                        "tooltip": "Can be used to override the FPS when previewing with video models. Disabled if set to 0.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def go(
+        cls,
+        *,
+        guider,
+        fps_override: float | None = None,
+    ) -> tuple:
+        return (
+            PreviewFixGuider(
+                guider,
+                fps_override=fps_override or None,
+            ),
+        )

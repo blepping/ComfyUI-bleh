@@ -184,7 +184,7 @@ class TAEVidContext:
 
 
 class TAEVid(nn.Module):
-    temporal_upscale_blocks = 2
+    temporal_upscale_blocks = 3
     spatial_upscale_blocks = 3
     _nf = (256, 128, 64, 64)
 
@@ -195,36 +195,44 @@ class TAEVid(nn.Module):
         vmi: VideoModelInfo,
         image_channels: int = 3,
         device="cpu",
-        decoder_time_upscale=(True, True),
+        encoder_time_downscale=(True, True, False),
+        decoder_time_upscale=(False, True, True),
         decoder_space_upscale=(True, True, True),
     ):
         n_f = self._nf
         super().__init__()
+        if len(decoder_time_upscale) == 2:
+            decoder_time_upscale = (True, *decoder_time_upscale)
         self.vmi = vmi
         self.latent_channels = vmi.latent_format.latent_channels
         self.image_channels = image_channels
         self.patch_size = vmi.patch_size
+        if vmi.name in {"ltxv", "ltxav"}:
+            encoder_time_downscale = (True, True, True)
+            decoder_time_upscale = (True, True, True)
+        encoder_strides = tuple(1 + int(flag) for flag in encoder_time_downscale)
+        decoder_strides = tuple(1 + int(flag) for flag in decoder_time_upscale)
+        decoder_scale_factors = tuple(1 + int(flag) for flag in decoder_space_upscale)
         self.encoder = nn.Sequential(
             conv(image_channels * self.patch_size**2, 64),
             nn.ReLU(inplace=True),
-            TPool(64, 2),
+            TPool(64, encoder_strides[0]),
             conv(64, 64, stride=2, bias=False),
             MemBlock(64, 64),
             MemBlock(64, 64),
             MemBlock(64, 64),
-            TPool(64, 2),
+            TPool(64, encoder_strides[1]),
             conv(64, 64, stride=2, bias=False),
             MemBlock(64, 64),
             MemBlock(64, 64),
             MemBlock(64, 64),
-            TPool(64, 1),
+            TPool(64, encoder_strides[2]),
             conv(64, 64, stride=2, bias=False),
             MemBlock(64, 64),
             MemBlock(64, 64),
             MemBlock(64, 64),
             conv(64, vmi.latent_format.latent_channels),
         )
-        self.frames_to_trim = 2 ** sum(decoder_time_upscale) - 1
         self.decoder = nn.Sequential(
             Clamp(),
             conv(vmi.latent_format.latent_channels, n_f[0]),
@@ -232,24 +240,27 @@ class TAEVid(nn.Module):
             MemBlock(n_f[0], n_f[0]),
             MemBlock(n_f[0], n_f[0]),
             MemBlock(n_f[0], n_f[0]),
-            nn.Upsample(scale_factor=2 if decoder_space_upscale[0] else 1),
-            TGrow(n_f[0], 1),
+            nn.Upsample(scale_factor=decoder_scale_factors[0]),
+            TGrow(n_f[0], decoder_strides[0]),
             conv(n_f[0], n_f[1], bias=False),
             MemBlock(n_f[1], n_f[1]),
             MemBlock(n_f[1], n_f[1]),
             MemBlock(n_f[1], n_f[1]),
-            nn.Upsample(scale_factor=2 if decoder_space_upscale[1] else 1),
-            TGrow(n_f[1], 2 if decoder_time_upscale[0] else 1),
+            nn.Upsample(scale_factor=decoder_scale_factors[1]),
+            TGrow(n_f[1], decoder_strides[1]),
             conv(n_f[1], n_f[2], bias=False),
             MemBlock(n_f[2], n_f[2]),
             MemBlock(n_f[2], n_f[2]),
             MemBlock(n_f[2], n_f[2]),
-            nn.Upsample(scale_factor=2 if decoder_space_upscale[2] else 1),
-            TGrow(n_f[2], 2 if decoder_time_upscale[1] else 1),
+            nn.Upsample(scale_factor=decoder_scale_factors[2]),
+            TGrow(n_f[2], decoder_strides[2]),
             conv(n_f[2], n_f[3], bias=False),
             nn.ReLU(inplace=True),
             conv(n_f[3], image_channels * self.patch_size**2),
         )
+        self.t_upscale = 2 ** sum(decoder_time_upscale)
+        self.t_downscale = 2 ** sum(encoder_time_downscale)
+        self.frames_to_trim = self.t_upscale - 1
         if checkpoint_path is None:
             return
         self.load_state_dict(
@@ -304,8 +315,15 @@ class TAEVid(nn.Module):
         show_progress=False,
     ) -> torch.Tensor:
         model = self.decoder if decode else self.encoder
-        if not decode and self.vmi.patch_size > 1:
-            x = F.pixel_unshuffle(x, self.patch_size)
+        if not decode:
+            if self.vmi.patch_size > 1:
+                x = F.pixel_unshuffle(x, self.patch_size)
+            # Pad handling copied from https://github.com/madebyollin
+            if x.shape[1] % self.t_downscale != 0:
+                # pad at end to multiple of self.t_downscale
+                n_pad = self.t_downscale - x.shape[1] % self.t_downscale
+                padding = x[:, -1:].repeat_interleave(n_pad, dim=1)
+                x = torch.cat([x, padding], 1)
         if parallel:
             result = self.apply_parallel(x, model, show_progress=show_progress)
         else:

@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import NamedTuple
 
 
 class Settings:
@@ -7,6 +10,8 @@ class Settings:
 
     def update(self, obj):
         btp = obj.get("betterTaesdPreviews", None)
+        if btp is None:
+            btp = obj.get("previews", None)
         self.btp_enabled = btp is not None and btp.get("enabled", True) is True
         if not self.btp_enabled:
             return
@@ -23,6 +28,7 @@ class Settings:
         self.btp_preview_device = btp.get("preview_device")
         # default, keep, float32, float16, bfloat16
         self.btp_preview_dtype = btp.get("preview_dtype")
+        self.btp_preview_non_blocking = bool(btp.get("preview_non_blocking", False))
         self.btp_maxed_batch_step_mode = btp.get("maxed_batch_step_mode", False)
         self.btp_compile_previewer = btp.get("compile_previewer", False)
         self.btp_oom_fallback = btp.get("oom_fallback", "latent2rgb")
@@ -37,6 +43,7 @@ class Settings:
         )
         self.btp_animate_preview = btp.get("animate_preview", "none")
         self.btp_verbose = btp.get("verbose", False)
+        self.btp_publish_last_preview = btp.get("publish_last_preview", False)
 
     @staticmethod
     def get_cfg_path(filename) -> Path:

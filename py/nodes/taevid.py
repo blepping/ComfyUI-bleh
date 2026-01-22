@@ -18,7 +18,19 @@ class TAEVideoNodeBase:
     def INPUT_TYPES(cls) -> dict:
         return {
             "required": {
-                "latent_type": (("wan21", "wan22", "hunyuanvideo", "mochi"),),
+                "latent_type": (
+                    (
+                        "wan21",
+                        "wan22",
+                        "hunyuanvideo",
+                        "hunyuanvideo15",
+                        "mochi",
+                        "ltxv",
+                    ),
+                    {
+                        "tooltip": "Use ltxv for LTX-2 AV.",
+                    },
+                ),
                 "parallel_mode": (
                     "BOOLEAN",
                     {
@@ -45,6 +57,8 @@ class TAEVideoNodeBase:
                 model_src = "taew2_2.pth from https://github.com/madebyollin/taehv"
             elif latent_type == "hunyuanvideo":
                 model_src = "taehv.pth from https://github.com/madebyollin/taehv"
+            elif latent_type == "ltxv":
+                model_src = "taeltx_2.pth from https://github.com/madebyollin/taehv"
             else:
                 model_src = "taem1.pth from https://github.com/madebyollin/taem1"
             err_string = f"Missing TAE video model. Download {model_src} and place it in the models/vae_approx directory"
@@ -66,7 +80,7 @@ class TAEVideoNodeBase:
 class TAEVideoDecode(TAEVideoNodeBase):
     RETURN_TYPES = ("IMAGE",)
     CATEGORY = "latent"
-    DESCRIPTION = "Fast decoding of Wan, Hunyuan and Mochi video latents with the video equivalent of TAESD."
+    DESCRIPTION = "Fast decoding of Wan, Hunyuan, Mochi and LTX video latents with the video equivalent of TAESD."
 
     @classmethod
     def INPUT_TYPES(cls) -> dict:
@@ -100,7 +114,7 @@ class TAEVideoDecode(TAEVideoNodeBase):
 class TAEVideoEncode(TAEVideoNodeBase):
     RETURN_TYPES = ("LATENT",)
     CATEGORY = "latent"
-    DESCRIPTION = "Fast encoding of Wan, Hunyuan and Mochi video latents with the video equivalent of TAESD."
+    DESCRIPTION = "Fast encoding of Wan, Hunyuan, Mochi and LTX video latents with the video equivalent of TAESD."
 
     @classmethod
     def INPUT_TYPES(cls) -> dict:
