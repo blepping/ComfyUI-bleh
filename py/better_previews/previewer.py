@@ -748,21 +748,21 @@ def bleh_get_previewer(
     )
     tae_model = None
     if preview_method in {LatentPreviewMethod.TAESD, LatentPreviewMethod.Auto}:
-        if vid_info is not None and vid_info.tae_model is not None:
+        if (
+            vid_info is not None
+            and vid_info.tae_model is not None
+            and vid_info.tae_class is not None
+        ):
             tae_model_path = folder_paths.get_full_path(
                 "vae_approx",
                 vid_info.tae_model,
             )
-            tupscale_limit = SETTINGS.btp_video_temporal_upscale_level
-            decoder_time_upscale = tuple(
-                i < tupscale_limit for i in range(TAEVid.temporal_upscale_blocks)
-            )
             tae_model = (
-                TAEVid(
+                vid_info.tae_class(
                     checkpoint_path=tae_model_path,
                     vmi=vid_info,
                     device=torch.device("cpu"),
-                    decoder_time_upscale=decoder_time_upscale,
+                    decoder_time_upscale_level=SETTINGS.btp_video_temporal_upscale_level,
                 )
                 if tae_model_path is not None
                 else None

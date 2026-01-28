@@ -944,6 +944,30 @@ def ortho_blend(
     return ortho_result.reshape(orig_shape)
 
 
+def symmetric_ortho_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: torch.Tensor,
+    *,
+    symmetric_strength: float = 1.0,
+    symmetric_deduce_mode: bool = False,
+    **kwargs: dict,
+) -> torch.Tensor:
+    blended = ortho_blend(a, b, t, **kwargs)
+    if symmetric_strength == 0.0:
+        return blended
+    b_ortho = blended.sub_(a)
+    if symmetric_deduce_mode:
+        b_proj = b - b_ortho
+        # Projection would theoretically be the same for both, in the simple case at least?
+        # Actually, probably not. Oh well, this is here as an option now.
+        a_ortho = a - b_proj
+    else:
+        a_ortho = ortho_blend(b, a, a.new_tensor(1.0), **kwargs) - b
+    a_proj = a - a_ortho
+    return a_proj.mul_(1.0 - symmetric_strength).add_(a_ortho).add_(b_ortho)
+
+
 class WaveletBlend:
     wavelet: wavef.Wavelet | None = None
     use_float64: bool = False
@@ -1738,6 +1762,8 @@ BLENDING_MODES = {
         rescale_result_mode="blend",
         rescale_limit=2.0,
     ),
+    "symmetric_ortho": BlendMode(symmetric_ortho_blend),
+    "symmetric_ortho_rescaled": BlendMode(symmetric_ortho_blend, rescale_limit=2.0),
 }
 
 BLENDING_MODES |= {

@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from comfy import latent_formats
 
+from .tae_vid import TAEVid, TAEVidBase, TAEVidLTX2
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -17,6 +19,7 @@ class VideoModelInfo(NamedTuple):
     patch_size: int = 1
     nested_tensor_index: int = 0
     tae_model: str | Path | None = None
+    tae_class: TAEVidBase | None = TAEVid
 
 
 VIDEO_FORMATS = {
@@ -69,6 +72,7 @@ VIDEO_FORMATS = {
             patch_size=4,
             temporal_layers=3,
             tae_model="taeltx_2.pth",
+            tae_class=TAEVidLTX2,
         ),
         VideoModelInfo(
             "ltxav",
@@ -77,6 +81,7 @@ VIDEO_FORMATS = {
             patch_size=4,
             temporal_layers=3,
             tae_model="taeltx_2.pth",
+            tae_class=TAEVidLTX2,
         ),
     )
 }
