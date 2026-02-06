@@ -221,18 +221,26 @@ class ACEStepsPreviewerModel(torch.nn.Module):
         *,
         dtype: torch.dtype,
         device: torch.device,
+        height_factor: int = 4,
+        width_factor: int = 1,
         normalize_dims: tuple = (-1,),
     ):
         super().__init__()
         self.dtype = dtype
         self.device = device
         self.normalize_dims = normalize_dims
+        self.height_factor = height_factor
+        self.width_factor = width_factor
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, temporal = x.shape[0], x.shape[-1]
         x = normalize_to_scale(x, 0.0, 1.0, dim=self.normalize_dims) * 255.0
         x = x.reshape(batch, -1, temporal)
+        if self.height_factor > 1:
+            x = x.repeat_interleave(dim=1, repeats=self.height_factor)
+        if self.width_factor > 1:
+            x = x.repeat_interleave(dim=1, repeats=self.width_factor)
         return x[..., None].expand(*x.shape, 3)
 
 
@@ -609,7 +617,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
             and self.fallback_previewer_model.device == device
         ):
             return True
-        if self.latent_format_name == "aceaudio":
+        if self.latent_format_name in {"aceaudio", "aceaudio15"}:
             self.fallback_previewer_model = ACEStepsPreviewerModel(
                 device=device,
                 dtype=dtype,
@@ -651,6 +659,8 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         expected_ndim = 2 + self.latent_format.latent_dimensions
         if x0.shape[0] == 0:
             return x0, False
+        if self.latent_format_name == "aceaudio15" and x0.ndim == expected_ndim + 1:
+            expected_ndim += 1
         if (
             x0.ndim > 1
             and x0.ndim == expected_ndim
@@ -740,7 +750,7 @@ def bleh_get_previewer(
         or (SETTINGS.btp_whitelist and format_name not in SETTINGS.btp_whitelist)
     ):
         return orig_get_previewer()
-    if format_name == "aceaudio":
+    if format_name in {"aceaudio", "aceaudio15"}:
         return BetterPreviewer(latent_format=latent_format)
     vid_info = VIDEO_FORMATS.get(format_name)
     eff_latent_format = (

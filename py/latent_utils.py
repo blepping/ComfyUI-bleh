@@ -1158,6 +1158,8 @@ class BlendMode:
         "norm",
         "norm_dims",
         "rescale_dims",
+        "rescale_max",
+        "rescale_min",
         "rev",
         "scale_multiplier",
         "visible",
@@ -1174,6 +1176,8 @@ class BlendMode:
         rev: bool = False,
         allow_scale: bool = True,
         rescale_dims: tuple = (-3, -2, -1),
+        rescale_min: float = 0.0,
+        rescale_max: float = 1.0,
         force_rescale: bool = False,
         fork_rng: bool = False,
         invert_scale: float | None = None,
@@ -1193,53 +1197,35 @@ class BlendMode:
         self.rev = rev
         self.allow_scale = allow_scale
         self.rescale_dims = rescale_dims
+        self.rescale_min = rescale_min
+        self.rescale_max = rescale_max
         self.force_rescale = force_rescale
         self.fork_rng = fork_rng
         self.invert_scale = invert_scale
         self.scale_multiplier = scale_multiplier
         self.visible = visible
 
-    def edited(
-        self,
-        *,
-        f=_Empty,
-        norm=_Empty,
-        norm_dims=_Empty,
-        rev=_Empty,
-        allow_scale=_Empty,
-        rescale_dims=_Empty,
-        force_rescale=_Empty,
-        fork_rng=_Empty,
-        invert_scale=_Empty,
-        scale_multiplier=_Empty,
-        visible=_Empty,
-        preserve_kwargs=True,
-        **kwargs: dict,
-    ) -> object:
+    def edited(self, *, f=_Empty, preserve_kwargs=True, **kwargs: dict) -> BlendMode:
         empty = self._Empty
         kwargs = (self.f_kwargs | kwargs) if preserve_kwargs else kwargs
-        return self.__class__(
-            f if f is not empty else self.f_raw,
-            norm=norm if norm is not empty else self.norm,
-            norm_dims=norm_dims if norm_dims is not empty else self.norm_dims,
-            rev=rev if rev is not empty else self.rev,
-            allow_scale=allow_scale if allow_scale is not empty else self.allow_scale,
-            rescale_dims=rescale_dims
-            if rescale_dims is not empty
-            else self.rescale_dims,
-            force_rescale=force_rescale
-            if force_rescale is not empty
-            else self.force_rescale,
-            fork_rng=fork_rng if fork_rng is not empty else self.fork_rng,
-            invert_scale=invert_scale
-            if invert_scale is not empty
-            else self.invert_scale,
-            scale_multiplier=scale_multiplier
-            if scale_multiplier is not empty
-            else self.scale_multiplier,
-            visible=visible if visible is not empty else self.visible,
-            **kwargs,
-        )
+        kwargs |= {
+            k: v if (v := kwargs.get(k, empty)) is not empty else getattr(self, k)
+            for k in (
+                "norm",
+                "norm_dims",
+                "rev",
+                "allow_scale",
+                "rescale_dims",
+                "rescale_min",
+                "rescale_max",
+                "force_rescale",
+                "fork_rng",
+                "invert_scale",
+                "scale_multiplier",
+                "visible",
+            )
+        }
+        return self.__class__(f if f is not empty else self.f_raw, **kwargs)
 
     def rescale(self, t, *, rescale_dims=_Empty):
         if t.ndim > 2:
@@ -1251,7 +1237,11 @@ class BlendMode:
             rescale_dims = -1
         tmin = torch.amin(t, keepdim=True, dim=rescale_dims)
         tmax = torch.amax(t, keepdim=True, dim=rescale_dims)
-        return (t - tmin).div_(tmax - tmin).clamp_(0, 1), tmin, tmax
+        return (
+            (t - tmin).div_(tmax - tmin).clamp_(self.rescale_min, self.rescale_max),
+            tmin,
+            tmax,
+        )
 
     def __call__(
         self,
@@ -1470,7 +1460,8 @@ BLENDING_MODES = {
     "a_only": BlendMode(lambda a, _b, t: a * t, allow_scale=False),
     "b_only": BlendMode(lambda _a, b, t: b * t, allow_scale=False),
     # Interpolates between tensors a and b using normalized linear interpolation.
-    "bislerp": BlendMode(
+    # This definitely isn't biSLERP.
+    "bislerp_wrong": BlendMode(
         lambda a, b, t: ((1 - t) * a).add_(t * b),
         normalize,
     ),
@@ -1535,6 +1526,7 @@ BLENDING_MODES = {
     "inject_avoidsign_a": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(a.neg())),
     "inject_avoidsign_b": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(b.neg())),
     "cfg": BlendMode(lambda a, b, t: (a - b).mul_(t).add_(b)),
+    "cfg_base_a": BlendMode(lambda a, b, t: (a - b).mul_(t).add_(a)),
     # Interpolates between tensors a and b using linear interpolation.
     # "lerp": BlendMode(lambda a, b, t: ((1.0 - t) * a).add_(t * b)),
     "lerp": BlendMode(torch.lerp),
@@ -1554,6 +1546,9 @@ BLENDING_MODES = {
     ),
     "lerp_avoidsign_b": BlendMode(
         lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(b.neg()),
+    ),
+    "weighted_average": BlendMode(
+        lambda a, b, t: (b * t).add_(a) / (1.0 + abs(t)),
     ),
     # Simulates a brightening effect by adding tensor b to tensor a, scaled by t.
     "lineardodge": BlendMode(lambda a, b, t: (b * t).add_(a)),
@@ -1762,8 +1757,20 @@ BLENDING_MODES = {
         rescale_result_mode="blend",
         rescale_limit=2.0,
     ),
+    "ortho_cfg": BlendMode(
+        lambda a, b, t, **kwargs: ortho_blend(b, a - b, t, **kwargs),
+    ),
+    "ortho_cfg_base_a": BlendMode(
+        lambda a, b, t, **kwargs: ortho_blend(a, a - b, t, **kwargs),
+    ),
     "symmetric_ortho": BlendMode(symmetric_ortho_blend),
     "symmetric_ortho_rescaled": BlendMode(symmetric_ortho_blend, rescale_limit=2.0),
+    "symmetric_ortho_cfg": BlendMode(
+        lambda a, b, t, **kwargs: symmetric_ortho_blend(b, a - b, t, **kwargs),
+    ),
+    "symmetric_ortho_cfg_base_a": BlendMode(
+        lambda a, b, t, **kwargs: symmetric_ortho_blend(a, a - b, t, **kwargs),
+    ),
 }
 
 BLENDING_MODES |= {
@@ -1787,10 +1794,10 @@ BIDERP_MODES |= {
     "bislerp": slerp_orig,
     "altbislerp": altslerp,
     "revaltbislerp": lambda a, b, t: altslerp(b, a, t),
-    "bibislerp": BLENDING_MODES["bislerp"].edited(norm_dims=0),
+    "bibislerp": BLENDING_MODES["bislerp_wrong"].edited(norm_dims=0),
     "revhslerp": lambda a, b, t: hslerp_alt(b, a, t),
     "revbislerp": lambda a, b, t: slerp_orig(b, a, t),
-    "revbibislerp": BLENDING_MODES["revbislerp"].edited(norm_dims=0),
+    "revbibislerp": BLENDING_MODES["revbislerp_wrong"].edited(norm_dims=0),
 }
 
 FILTER_PRESETS = {
