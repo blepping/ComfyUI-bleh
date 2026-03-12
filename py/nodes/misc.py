@@ -2,18 +2,24 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import math
 import operator
 import random
 from decimal import Decimal
 from functools import partial
+from itertools import pairwise
+from typing import TYPE_CHECKING, Any
 
 import torch
 from comfy import model_management
 from comfy.model_management import throw_exception_if_processing_interrupted
 
+from .. import latent_utils
 from ..better_previews.previewer import PREVIEWER_STATE, ensure_previewer
-from ..latent_utils import normalize_to_scale
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class DiscardPenultimateSigma:
@@ -406,7 +412,7 @@ class BlehLatentAsImage:
         )[..., :4]
         if values_mode == "clamp":
             return (image.clamp(0.0, 1.0),)
-        image = normalize_to_scale(
+        image = latent_utils.normalize_to_scale(
             image,
             0.0,
             1.0,
@@ -534,71 +540,33 @@ class BlehModelProcessLatentOut:
 
 
 class PreviewFixGuider:
-    def __init__(self, guider, *, fps_override: int | float | None = None):
+    def __init__(self, guider, **kwargs: Any):
         self.__guider = guider
-        self.__fps_override = fps_override
+        self.__state_overrides = {k: v for k, v in kwargs.items() if v is not None}
 
     def __getattr__(self, k):
         return getattr(self.__guider, k)
 
-    def sample(self, noise, latent_image, *args, **kwargs):
+    def sample(self, noise, latent_image, *args: Any, **kwargs: Any):
         latent_shapes = (
             (tuple(latent_image.shape),)
             if not latent_image.is_nested
             else tuple(tuple(t.shape) for t in latent_image.unbind())
         )
         PREVIEWER_STATE.last_latent_shapes = latent_shapes
-        fps_override = self.__fps_override
-        if fps_override:
-            PREVIEWER_STATE.fps_override = fps_override
+        soverrides = self.__state_overrides
+        saved_state = {}
+        if soverrides:
+            saved_state |= {k: getattr(PREVIEWER_STATE, k, None) for k in soverrides}
+            for k, v in soverrides.items():
+                setattr(PREVIEWER_STATE, k, v)
         try:
             return self.__guider.sample(noise, latent_image, *args, **kwargs)
         finally:
             PREVIEWER_STATE.last_latent_shapes = None
-            PREVIEWER_STATE.fps_override = None
-
-    # def sample(self, noise, latent_image, *args, **kwargs):
-    #     nest_index = self.__nest_index
-    #     orig_callback = kwargs.get("callback")
-    #     sample = partial(self.__guider.sample, noise, latent_image, *args)
-    #     if not (latent_image.is_nested and orig_callback is not None):
-    #         # Either not nested or no callback, so no need to fix previewing.
-    #         return sample(**kwargs)
-    #     latent_part_sizes = tuple(
-    #         t.shape if isinstance(t, torch.Tensor) and not t.is_nested else None
-    #         for t in latent_image.unbind()
-    #     )
-    #     if not (
-    #         len(latent_part_sizes) >= nest_index
-    #         and all(ps is not None for ps in latent_part_sizes)
-    #     ):
-    #         # Multiple levels of nesting not yet implemented.
-    #         return sample(**kwargs)
-    #     offset = 0
-    #     # ComfyUI preserves the batch dimension and smashes everything else together.
-    #     for ps in latent_part_sizes[:nest_index]:
-    #         offset += math.prod(ps[1:])
-    #     orig_shape = latent_part_sizes[nest_index]
-    #     orig_nelems = math.prod(orig_shape[1:])
-
-    #     def cb_wrapper(i, denoised, x, *args, **kwargs) -> None:
-    #         print(
-    #             f"\n\nCB SHAPES: {denoised.shape}, {x.shape}, orig {orig_shape}, orig elems {orig_nelems}",
-    #         )
-    #         denoised, x = (
-    #             t[:, :, offset : offset + orig_nelems].reshape(
-    #                 t.shape[0],
-    #                 *orig_shape[1:],
-    #             )
-    #             for t in (denoised, x)
-    #         )
-    #         print(
-    #             f"\n\nFIXED CB SHAPES: {denoised.shape}, {x.shape}",
-    #         )
-    #         return orig_callback(i, denoised, x, *args, **kwargs)
-
-    #     kwargs["callback"] = cb_wrapper
-    #     return sample(**kwargs)
+            if saved_state:
+                for k, v in saved_state.items():
+                    setattr(PREVIEWER_STATE, k, v)
 
 
 class BlehFixGuiderPreviewing:
@@ -624,6 +592,15 @@ class BlehFixGuiderPreviewing:
                     },
                 ),
             },
+            "optional": {
+                "prefer_previewer": (
+                    ("default", "ltxav", "ltxav23", "ltxav23wide"),
+                    {
+                        "default": "default",
+                        "tooltip": "This is mostly only useful for LTX 2.3 since there isn't a way for the internal logic to know what latent format is being used. Set this to ltxav23 for LTX 2.3 (ltxav23wide for the wide previewer model), otherwise leave on the default. Note: This option sets global state.",
+                    },
+                ),
+            },
         }
 
     @classmethod
@@ -632,10 +609,438 @@ class BlehFixGuiderPreviewing:
         *,
         guider,
         fps_override: float | None = None,
+        prefer_previewer: str | None = None,
     ) -> tuple:
+        if prefer_previewer:
+            PREVIEWER_STATE.prefer_previewer = prefer_previewer
         return (
             PreviewFixGuider(
                 guider,
-                fps_override=fps_override or None,
+                fps_override=fps_override if fps_override != 0.0 else None,
             ),
         )
+
+
+class ConditioningBlender:
+    """Base class for complex chronological conditioning blending."""
+
+    def __call__(self, *args: Any, **kwargs: Any):
+        return self.blend(*args, **kwargs)
+
+    @staticmethod
+    def get_bounds(meta_dict: dict) -> tuple[float, float]:
+        start = meta_dict.get("start_percent", 0.0)
+        end = meta_dict.get("end_percent", 1.0)
+        if start >= end:
+            end = math.nextafter(start, 2.0)
+        return start, end
+
+    def get_boundaries(self, cond1: list, cond2: list) -> list[float]:
+        boundaries = {0.0, 1.0}
+        for item in cond1 + cond2:
+            start, end = self.get_bounds(item[1])
+            boundaries.add(start)
+            boundaries.add(end)
+        return sorted(boundaries)
+
+    def get_active_items(self, cond_list: list, t_start: float, t_end: float) -> list:
+        active = []
+        for item in cond_list:
+            c_start, c_end = self.get_bounds(item[1])
+            if c_start <= t_start and c_end >= t_end:
+                active.append(item)
+        return active
+
+    def simple_blend_wrapper(
+        self,
+        blend_function: Callable,
+        cond1: list,
+        cond2: list,
+        strength: float,
+        *,
+        new_start_percent: float,
+        new_end_percent: float,
+        **kwargs: Any,
+    ) -> list:
+        blended_tensor = blend_function(cond1[0], cond2[0], strength, **kwargs)
+        new_meta = copy.deepcopy(cond1[1])
+        new_meta |= {
+            "start_percent": new_start_percent,
+            "end_percent": new_end_percent,
+        }
+        return [blended_tensor, new_meta]
+
+    def blend(
+        self,
+        cond1: list,
+        cond2: list,
+        blend_func: Callable,
+        *,
+        strength: float = 0.5,
+        blend_full_items: bool = False,
+        **kwargs: Any,
+    ) -> list:
+        boundaries = self.get_boundaries(cond1, cond2)
+        if not blend_full_items:
+            blend_func = partial(self.simple_blend_wrapper, blend_func)
+
+        result_conditioning = []
+
+        for t_start, t_end in pairwise(boundaries):
+            if t_start >= t_end:
+                continue
+
+            active1 = self.get_active_items(cond1, t_start, t_end)
+            active2 = self.get_active_items(cond2, t_start, t_end)
+            first_active_cond = active1 or active2
+
+            if not first_active_cond:
+                continue
+
+            adjusted_end = math.nextafter(t_end, -1.0) if t_end < 1.0 else t_end
+
+            if not (active1 and active2):
+                for c in first_active_cond:
+                    new_meta = copy.deepcopy(c[1])
+                    new_meta |= {"start_percent": t_start, "end_percent": adjusted_end}
+                    result_conditioning.append([c[0].clone(), new_meta])
+                continue
+
+            for c1 in active1:
+                for c2 in active2:
+                    blend_result = blend_func(
+                        c1,
+                        c2,
+                        strength,
+                        new_start_percent=t_start,
+                        new_end_percent=adjusted_end,
+                        **kwargs,
+                    )
+                    result_conditioning.append(blend_result)
+
+        return result_conditioning
+
+
+class BlehConditioningBlender(ConditioningBlender):
+    """Extended Blender capable of N-dimensional dynamic slicing, padding, and alignment."""
+
+    def __init__(
+        self,
+        *,
+        size_mismatch_strategy: str = "zero",
+        size_mismatch_alignment_mode: str = "left",
+        **kwargs: Any,
+    ):
+        super().__init__(**kwargs)
+        self.strategy = size_mismatch_strategy
+        self.alignment = size_mismatch_alignment_mode
+
+    def get_slices(
+        self,
+        shape: torch.Size | tuple[int, ...],
+        target_shape: torch.Size | tuple[int, ...],
+    ) -> tuple[tuple[slice, ...], tuple[slice, ...]]:
+        """Generates N-dimensional slice objects for both source and target."""
+        src_slices, tgt_slices = [], []
+        for sz, tgt_sz in zip(shape, target_shape, strict=True):
+            # Slice start, slice end, target start, target end
+            ss = se = ts = te = None
+            if sz < tgt_sz:  # Padding source into target
+                if self.alignment == "left":
+                    ts = 0
+                elif self.alignment == "right":
+                    ts = tgt_sz - sz
+                else:  # center
+                    ts = (tgt_sz - sz) // 2
+                te = ts + sz
+            elif sz > tgt_sz:  # Cropping source down to target
+                if self.alignment == "left":
+                    ss = 0
+                elif self.alignment == "right":
+                    ss = sz - tgt_sz
+                else:  # center
+                    ss = (sz - tgt_sz) // 2
+                se = ss + tgt_sz
+            src_slices.append(slice(ss, se))
+            tgt_slices.append(slice(ts, te))
+        return tuple(src_slices), tuple(tgt_slices)
+
+    def process_tensor(
+        self,
+        t: torch.Tensor,
+        other_t: torch.Tensor,
+        *,
+        orig_t1: torch.Tensor,
+        orig_t2: torch.Tensor,
+        target_shape: tuple[int, ...],
+    ) -> torch.Tensor:
+        if t.shape == target_shape:
+            return t
+
+        if self.strategy == "replicate":
+            repeats = []
+            for sz, tgt_sz in zip(t.shape, target_shape, strict=True):
+                if tgt_sz % sz != 0:
+                    errstr = f"Cannot replicate conditioning tensor: target size {tgt_sz} is not evenly divisible by source size {sz}."
+                    raise ValueError(errstr)
+                repeats.append(tgt_sz // sz)
+            return t.repeat(*repeats)
+
+        src_slices, tgt_slices = self.get_slices(t.shape, target_shape)
+
+        if self.strategy == "smaller":
+            return t[src_slices]
+
+        # --- Padding Strategies ---
+        if self.strategy == "mean_cond_1":
+            # Always uses orig_t1, regardless of which tensor is currently 't'
+            dims = list(range(1, orig_t1.ndim)) if orig_t1.ndim > 1 else [0]
+            mean_val = orig_t1.mean(dim=dims, keepdim=True)
+            out = mean_val.expand(target_shape).clone()
+        elif self.strategy == "mean_cond_2":
+            # Always uses orig_t2, regardless of which tensor is currently 't'
+            dims = list(range(1, orig_t2.ndim)) if orig_t2.ndim > 1 else [0]
+            mean_val = orig_t2.mean(dim=dims, keepdim=True)
+            out = mean_val.expand(target_shape).clone()
+        elif self.strategy in {"larger", "match_cond_1", "match_cond_2"}:
+            out = other_t.expand(target_shape).clone()
+        else:  # "zero"
+            out = t.new_zeros(target_shape)
+
+        out[tgt_slices] = t[src_slices]
+        return out
+
+    def align_tensors(
+        self,
+        t1: torch.Tensor,
+        t2: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Aligns two arbitrary N-dimensional tensors based on the instance's strategy and alignment modes."""
+        if t1.shape == t2.shape:
+            return t1, t2
+
+        if t1.ndim != t2.ndim:
+            errstr = f"Can't align tensors with different numbers of dimensions. t1 shape: {t1.shape} ({t1.ndim}), t2 shape: {t2.shape} ({t2.ndim})"
+            raise ValueError(errstr)
+
+        if self.strategy == "error":
+            errstr = (
+                f"Size mismatch: {t1.shape} vs {t2.shape} (Strategy set to 'error')"
+            )
+            raise ValueError(errstr)
+
+        if self.strategy == "match_cond_1":
+            target_shape = t1.shape
+        elif self.strategy == "match_cond_2":
+            target_shape = t2.shape
+        else:
+            size_op: Callable = min if self.strategy == "smaller" else max
+            target_shape = tuple(
+                size_op(s1, s2) for s1, s2 in zip(t1.shape, t2.shape, strict=True)
+            )
+
+        # Pass t1 and t2 as the strict originals to preserve the mean math!
+        out1 = self.process_tensor(
+            t=t1,
+            other_t=t2,
+            orig_t1=t1,
+            orig_t2=t2,
+            target_shape=target_shape,
+        )
+        out2 = self.process_tensor(
+            t=t2,
+            other_t=t1,
+            orig_t1=t1,
+            orig_t2=t2,
+            target_shape=target_shape,
+        )
+        return out1, out2
+
+
+class BlehBlendConditioning:
+    DESCRIPTION = "Blends conditioning_1 with conditioning_2. Unlike the ComfyUI builtin node, this can handle multiple conditioning items on both side and respects time ranges but not other potential ranges (I.E. regional conditioning). Note however that conditionings are generally encoded as sequences of tokens, so something like 'a cute dog' blended with 'sketch of a cat' is likely to be doing something like blending 'a' with 'sketch', 'cute' with 'of', etc."
+    FUNCTION = "go"
+    OUTPUT_NODE = False
+    CATEGORY = "conditioning"
+    RETURN_TYPES = ("CONDITIONING",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning_1": ("CONDITIONING",),
+                "conditioning_2": ("CONDITIONING",),
+                "blend_mode": (
+                    tuple(latent_utils.BLENDING_MODES.keys()),
+                    {"default": "lerp"},
+                ),
+                "strength": (
+                    "FLOAT",
+                    {
+                        "min": -99999.0,
+                        "max": 999999.0,
+                        "default": 0.5,
+                    },
+                ),
+                "blend_cond_tensor": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Controls whether the base conditioning tensor is blended. When disabled, this will use the conditioning tensor from conditioning_1.",
+                    },
+                ),
+                "blend_tensors": (
+                    "STRING",
+                    {
+                        "default": "pooled_output",
+                        "tooltip": "Comma-separated list of other tensors to blend if they exist (for example pooled_output)",
+                    },
+                ),
+                "metadata_base_mode": (
+                    ("cond_1", "cond_2", "prefer_cond_1", "prefer_cond_2", "empty"),
+                    {
+                        "default": "prefer_cond_1",
+                        "tooltip": "Controls what metadata ends up in the blended conditioning item. Items in the blend_tensors list will always be included. Possible values:\ncond_1 - Uses conditioning_1\ncond_2 - See above\nprefer_cond_1 - Uses the key from conditioning_1 if it exists, otherwise conditioning_2\nprefer_cond_2 - See above.\nempty - Starts with empty metadata.",
+                    },
+                ),
+                "size_mismatch_strategy": (
+                    (
+                        "zero",
+                        "mean_cond_1",
+                        "mean_cond_2",
+                        "match_cond_1",
+                        "match_cond_2",
+                        "replicate",
+                        "larger",
+                        "smaller",
+                        "error",
+                    ),
+                    {
+                        "default": "zero",
+                        "tooltip": "Handles the case of size mismatches between items to be blended.\nzero - Uses the larger size, fills extra elements with zero (how ComfyUI usually handles it)\nmean_cond_1 - Same as above, uses the mean from conditioning_1.\nmean_cond_2 - See above.\nmatch_cond_1 - Matches the size to conditioning_1. Similar to choosing larger/smaller mode per-dimension (so alignment may apply).\nmatch_cond_2 - Same as above aside from using conditioning_2's sizes.\nreplicate - Replicates the smaller size to match the larger. It is an error if the sizes aren't evenly divisible. May be use for conditioning types like CLIP where mismatches will be increments of the CLIP max tokens size (77).\nlarger - Uses the values from the item with the larger size.\nsmaller - Prunes the tensor to the smaller size.\nerror - Size mismatches are an error.",
+                    },
+                ),
+                "size_mismatch_alignment_mode": (
+                    ("left", "right", "center"),
+                    {
+                        "default": "left",
+                        "tooltip": "Only applies to size mismatch strategies that use the larger size and pad.\nleft - Aligns existing values to lower indexes, padding will apply after them. This is ComfyUI's normal behavior, the other options are probably quite weird.\nright - Padding will apply to lower indexes.\ncenter - Tries to center (left-biased when the size isn't divisible by 2) populated values in the space.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def go(
+        cls,
+        *,
+        conditioning_1: list,
+        conditioning_2: list,
+        blend_mode: str,
+        strength: float,
+        blend_cond_tensor: bool,
+        blend_tensors: str,
+        metadata_base_mode: str,
+        size_mismatch_strategy: str,
+        size_mismatch_alignment_mode: str,
+    ) -> tuple:
+        blend_tensor_list = (s.strip() for s in blend_tensors.split(","))
+        blend_tensor_set = {s for s in blend_tensor_list if s}
+        blend_function = latent_utils.BLENDING_MODES[blend_mode]
+        mdbm = metadata_base_mode
+
+        # Initialize our stateful blender
+        blender = BlehConditioningBlender(
+            size_mismatch_strategy=size_mismatch_strategy,
+            size_mismatch_alignment_mode=size_mismatch_alignment_mode,
+        )
+
+        def blend_wrapper(
+            cond1: list,
+            cond2: list,
+            strength: float,
+            *,
+            new_start_percent: float,
+            new_end_percent: float,
+            **kwargs: Any,
+        ) -> list:
+            c1t, c1d = cond1[:2]
+            c2t, c2d = cond2[:2]
+            cond1_extra = cond1[2:]
+
+            if blend_cond_tensor:
+                c2t = c2t.to(c1t)
+                c1t, c2t = blender.align_tensors(c1t, c2t)
+
+            def is_blendable(t: torch.Tensor):
+                return isinstance(t, torch.Tensor) and t.dtype.is_floating_point
+
+            c1_tensor_keys = {
+                k
+                for k, v in c1d.items()
+                if k in blend_tensor_set and isinstance(v, torch.Tensor)
+            }
+            c2_tensor_keys = {
+                k
+                for k, v in c2d.items()
+                if k in blend_tensor_set and isinstance(v, torch.Tensor)
+            }
+            blendable_tensor_keys = c1_tensor_keys.intersection(c2_tensor_keys)
+
+            if mdbm == "empty":
+                md = {}
+            elif mdbm == "cond_1":
+                md = c1d
+            elif mdbm == "cond_2":
+                md = c2d
+            elif mdbm == "prefer_cond_1":
+                md = c2d | c1d
+            elif mdbm == "prefer_cond_2":
+                md = c1d | c2d
+            else:
+                raise ValueError("Bad metadata_base_mode")
+
+            if not blend_cond_tensor:
+                ct = c1t.clone()
+            else:
+                ct = blend_function(c1t, c2t, strength, **kwargs)
+
+            if ct is c1t or ct is c2t:
+                ct = ct.clone()
+
+            bmd = {}
+            for bk in blendable_tensor_keys:
+                mt1, mt2 = c1d[bk], c2d[bk]
+                if mt1.ndim != mt2.ndim:
+                    continue
+                mt2 = mt2.to(mt1)
+
+                # Apply the exact same logic to pooled_output / metadata tensors
+                mt1, mt2 = blender.align_tensors(mt1, mt2)
+
+                bmresult = blend_function(mt1, mt2, strength, **kwargs)
+                if bmresult is mt1 or bmresult is mt2:
+                    bmresult = bmresult.clone()
+                bmd[bk] = bmresult
+
+            if bmd:
+                md = {k: v for k, v in md.items() if k not in bmd}
+
+            md = copy.deepcopy(md)
+            md |= {
+                "start_percent": new_start_percent,
+                "end_percent": new_end_percent,
+                **bmd,
+            }
+            if cond1_extra:
+                cond1_extra = copy.deepcopy(cond1_extra)
+            return [ct, md, *cond1_extra]
+
+        result = blender.blend(
+            conditioning_1,
+            conditioning_2,
+            blend_wrapper,
+            strength=strength,
+            blend_full_items=True,
+        )
+        return (result,)

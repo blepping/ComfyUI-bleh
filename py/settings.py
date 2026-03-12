@@ -44,6 +44,11 @@ class Settings:
         self.btp_animate_preview = btp.get("animate_preview", "none")
         self.btp_verbose = btp.get("verbose", False)
         self.btp_publish_last_preview = btp.get("publish_last_preview", False)
+        self.btp_publish_last_preview_min_refresh = max(
+            1,
+            btp.get("publish_last_preview_min_refresh", 5),
+        )
+        self.btp_only_animate_last_preview = btp.get("only_animate_last_preview", True)
 
     @staticmethod
     def get_cfg_path(filename) -> Path:

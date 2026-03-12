@@ -3,24 +3,23 @@ from __future__ import annotations
 import math
 from io import BytesIO
 from time import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import comfy.utils as comfy_utils
 import folder_paths
 import latent_preview
 import torch
-from aiohttp import web
 from comfy import latent_formats
 from comfy.cli_args import LatentPreviewMethod
 from comfy.cli_args import args as comfy_args
 from comfy.model_management import device_supports_non_blocking, vae_dtype
 from comfy.taesd.taesd import TAESD
 from PIL import Image
-from server import PromptServer
 from tqdm import tqdm
 
 from ..settings import SETTINGS  # noqa: TID252
-from .base import VIDEO_FORMATS, VideoModelInfo
+from . import last_preview
+from .base import AMBIGUOUS_VIDEO_FORMATS, VIDEO_FORMATS, VideoModelInfo
 from .tae_vid import TAEVid
 
 if TYPE_CHECKING:
@@ -33,6 +32,7 @@ if TYPE_CHECKING:
 class BlehPreviewerState:
     last_latent_shapes: tuple | None = None
     fps_override: float | None = None
+    prefer_previewer: str | None = None
 
 
 PREVIEWER_STATE = BlehPreviewerState()
@@ -94,75 +94,58 @@ def normalize_to_scale(latent, target_min, target_max, *, dim=(-3, -2, -1)):
     )
 
 
-class LastPreview:
-    image: bytes | None
-    stamp: float | None
-    content_type: str | None
-
-    dum_page = """
-    <html>
-      <head>
-        <title>bleh preview</title>
-        <meta http-equiv="refresh" content="10">
-      </head>
-      <body style="background-color: #303030; margin: 0">
-        <a href="/bleh/last_preview" target="_blank">
-          <img src="/bleh/last_preview" style="width: 100%; height: auto; max-height: 100vh; object-fit: contain;">
-        </a>
-      </body>
-    </html>
-    """
-
-    def __init__(self):
-        self.image = None
-        self.stamp = None
-        self.content_type = None
-
-    def update(
-        self, *, image_bytes: bytes, content_type: str, stamp: float | None = None
-    ):
-        self.image = image_bytes
-        self.stamp = time() if stamp is None else stamp
-        self.content_type = content_type
-
-    async def __call__(self, request: web.Request):
-        if request.path.endswith(".html"):
-            return web.Response(body=self.dum_page, content_type="text/html")
-        if self.image is None or self.content_type is None:
-            raise web.HTTPNotFound(reason="OHNO")
-        return web.Response(body=self.image, content_type=self.content_type)
-
-
-LAST_PREVIEW = LastPreview()
-PromptServer.instance.routes.get("/bleh/last_preview")(LAST_PREVIEW)
-PromptServer.instance.routes.get("/bleh/last_preview.html")(LAST_PREVIEW)
-
-
 class ImageWrapper:
     def __init__(self, frames: tuple | Image, frame_duration: int = 250):
         self._frames = (frames,) if not isinstance(frames, (tuple, list)) else frames
         self._frame_duration = frame_duration
 
-    def save(self, fp, format: str | None, **kwargs: dict):  # noqa: A002
-        if len(self._frames) > 1:
-            kwargs |= {
+    def _save_image(
+        self,
+        frames: tuple[Image, ...],
+        *,
+        format: str | None,  # noqa: A002
+        **kwargs: Any,
+    ) -> BytesIO:
+        buf = BytesIO()
+        extra_kwargs = (
+            {}
+            if len(frames) < 2
+            else {
                 "loop": 0,
                 "save_all": True,
-                "append_images": self._frames[1:],
+                "append_images": frames[1:],
                 "duration": self._frame_duration,
             }
-            format = "webp"
-        if not SETTINGS.btp_publish_last_preview:
-            return self._frames[0].save(fp, format, **kwargs)
-        buf = BytesIO()
-        result = self._frames[0].save(buf, format, **kwargs)
-        # FIXME
-        image_bytes = buf.getvalue()
-        LAST_PREVIEW.update(image_bytes=image_bytes, content_type=f"image/{format}")
-        fp.write(image_bytes)
-        return result
+        )
+        frames[0].save(buf, format, **extra_kwargs, **kwargs)
+        return buf
 
-    def resize(self, *args: list, **kwargs: dict) -> ImageWrapper:
+    def save(self, fp, format: str | None, **kwargs: Any):  # noqa: A002
+        frames = self._frames
+        publishing = last_preview.LAST_PREVIEW is not None
+        animated = len(frames) > 1
+        split_preview = (
+            animated and publishing and SETTINGS.btp_only_animate_last_preview
+        )
+        result_format = "webp" if animated else (format or "png")
+        result = self._save_image(frames, format=result_format, **kwargs).getvalue()
+        _preview_format, preview_result = (
+            (result_format, result)
+            if not split_preview
+            else (
+                format,
+                self._save_image(frames[:1], format=format, **kwargs).getvalue(),
+            )
+        )
+        if publishing:
+            last_preview.LAST_PREVIEW.update(
+                image_bytes=result,
+                content_type=f"image/{result_format}",
+                duration=2 + int(len(self._frames) / max(1, self._frame_duration)),
+            )
+        fp.write(preview_result)
+
+    def resize(self, *args: Any, **kwargs: Any) -> ImageWrapper:
         return ImageWrapper(
             tuple(frame.resize(*args, **kwargs) for frame in self._frames),
             frame_duration=self._frame_duration,
@@ -703,6 +686,10 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         if (self.oom_count and not self.oom_retry) or self.previewer_model is None:
             return self.fallback_previewer(x0, quiet=True)
         is_video = x0.ndim == 5
+        if is_video:
+            # Who would be crazy enough to generate video batches?
+            # We'll just use the last item for now.
+            x0 = x0[-1:, ...]
         used_fallback = False
         start_time = time()
         try:
@@ -728,8 +715,8 @@ class BetterPreviewer(_ORIG_PREVIEWER):
 def bleh_get_previewer(
     device,
     latent_format: latent_formats.LatentFormat,
-    *args: list,
-    **kwargs: dict,
+    *args: Any,
+    **kwargs: Any,
 ) -> object | None:
     def orig_get_previewer():
         return _ORIG_GET_PREVIEWER(device, latent_format, *args, **kwargs)
@@ -744,6 +731,11 @@ def bleh_get_previewer(
         return orig_get_previewer()
 
     format_name = latent_format.__class__.__name__.lower()
+    if PREVIEWER_STATE.prefer_previewer in AMBIGUOUS_VIDEO_FORMATS.get(
+        format_name,
+        frozenset(),
+    ):
+        format_name = PREVIEWER_STATE.prefer_previewer
     if (
         not SETTINGS.btp_enabled
         or format_name in SETTINGS.btp_blacklist

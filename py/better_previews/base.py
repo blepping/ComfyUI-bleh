@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from comfy import latent_formats
 
-from .tae_vid import TAEVid, TAEVidBase, TAEVidLTX2
+from .tae_vid import TAEVid, TAEVidBase, TAEVidLTX2, TAEVidLTX23Wide
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,8 +83,30 @@ VIDEO_FORMATS = {
             tae_model="taeltx_2.pth",
             tae_class=TAEVidLTX2,
         ),
+        VideoModelInfo(
+            "ltxav23",
+            latent_formats.LTXV,
+            fps=24,
+            patch_size=4,
+            temporal_layers=3,
+            tae_model="taeltx2_3.pth",
+            tae_class=TAEVidLTX2,
+        ),
+        VideoModelInfo(
+            "ltxav23wide",
+            latent_formats.LTXV,
+            fps=24,
+            patch_size=4,
+            temporal_layers=3,
+            tae_model="taeltx2_3_wide.pth",
+            tae_class=TAEVidLTX23Wide,
+        ),
     )
 }
 
+AMBIGUOUS_VIDEO_FORMATS = {
+    "ltxv": frozenset(("ltxav", "ltxav23", "ltxav23wide")),
+    "ltxav": frozenset(("ltxv", "ltxav23", "ltxav23wide")),
+}
 
-__all__ = ("VIDEO_FORMATS", "VideoModelInfo")
+__all__ = ("AMBIGUOUS_VIDEO_FORMATS", "VIDEO_FORMATS", "VideoModelInfo")

@@ -44,6 +44,7 @@ NODE_CLASS_MAPPINGS = {
     "BlehModelProcessLatentIn": misc.BlehModelProcessLatentIn,
     "BlehModelProcessLatentOut": misc.BlehModelProcessLatentOut,
     "BlehFixGuiderPreviewing": misc.BlehFixGuiderPreviewing,
+    "BlehBlendConditioning": misc.BlehBlendConditioning,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
