@@ -2,6 +2,20 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 2026TBD
+
+* Support LTX 2.0, LTX 2.3 and LTX 2.3 wide TAE models.
+* Added a `BlehFixGuiderPreviewing` node. Using this is necessary for LTX previews, it can also be used to set the LTX 2.3 wide previewer mode or override the default FPS when generating video previews.
+* ACE-Steps 1.5 latent visualization support in previews.
+* Default previewer datatype is now bfloat16. For the old behavior, you can set this to `null` in the config if you want.
+* Added `/bleh/last_preview.html` endpoint (defaults to disabled) which can serve the last preview in a separate page. Useful for video previews that don't normally animate in a ComfyUI workflow.
+* Many more blend modes.
+* Added a `BlehBlendConditioning` node. This allows blending multiple conditionings on both sides, unlike the built-in ComfyUI conditioning blend node.
+* `BlehBlockCFG` is better now? Maybe. I forget what I changed, but there are changes to it! (Note, still only works for diffusion models like SD 1.5 and SDXL.)
+* Added `BlehProcessLatentIn` and `BlehProcessLatentOut` nodes which can scale/unscale latents to what the model expects during sampling.
+* `previews` is now used for preview-related settings in the config file. `betterTaesdPreviews` will still work in existing config files.
+* Removed the example JSON configuration file. I don't recommend using JSON but it will still work if you really want to.
+
 ## 20250829
 
 * Added support for Wan 2.2 video previews.

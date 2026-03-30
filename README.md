@@ -8,7 +8,7 @@ For recent user-visible changes, please see the [ChangeLog](changelog.md).
 
 * Better TAESD previews (see below).
 * Visual previews for some audio models (currently only ACE-Steps).
-* Multi-frame video previews for most common video models (Wan 2.2, 2.1, Hunyuan, etc). See [the section on video encode/decode](#blehtaevideoencode-and-blehtaevideodecode).
+* Multi-frame video previews for most common video models (Wan 2.2, 2.1, Hunyuan, LTX 2.3, etc). See [the section on video encode/decode](#blehtaevideoencode-and-blehtaevideodecode).
 * Allow setting seed, timestep range and step interval for HyperTile (look for the [`BlehHyperTile`](#blehhypertile) node).
 * Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the [`BlehDeepShrink`](#blehdeepshrink) node).
 * Allow discarding penultimate sigma (look for the `BlehDiscardPenultimateSigma` node). This can be useful if you find certain samplers are ruining your image by spewing a bunch of noise into it at the very end (usually only an issue with `dpm2 a` or SDE samplers).
@@ -22,17 +22,20 @@ For recent user-visible changes, please see the [ChangeLog](changelog.md).
 
 ## Configuration
 
-Copy either `blehconfig.yaml.example` or `blehconfig.json.example` to `blehconfig.yaml` or `blehconfig.json` respectively and edit the copy. When loading configuration, the YAML file will be prioritized if it exists and Python has YAML support.
+Copy either `blehconfig.yaml.example` to `blehconfig.yaml` and edit the copy. Bleh will also check for a `blehconfig.json` file when starting up if the YAML one doesn't exist. I recommend using YAML here.
 
 Restart ComfyUI to apply any new changes.
 
 ### Better Previews
 
+There are links to the various TAE models used for high quality previewing near the bottom of this README.
+
 * Supports setting max preview size (ComfyUI default is hardcoded to 512 max).
 * Supports showing previews for more than the first latent in the batch.
 * Supports throttling previews. Do you really need your expensive high quality preview to get updated 3 times a second?
+* Supports LTX (2.0 and 2.3). **Note**: You need to use the `BlehFixGuiderPreviewing` node for LTX. See the description of it below.
 
-The previewer can now show visual previews for ACE-Steps latents. If you want to disable that feature, you can add `aceaudio` to the
+The previewer can now show visual previews for ACE-Steps (1.0 and 1.5) latents. If you want to disable that feature, you can add `aceaudio` to the
 `blacklist_formats` list. For example if you are using a YAML configuration file you could do: `blacklist_formats: ["aceaudio"]`
 
 **General settings defaults:**
@@ -48,6 +51,7 @@ The previewer can now show visual previews for ACE-Steps latents. If you want to
 |`throttle_secs`|`2`|Max frequency to decode the latents for previewing. `0.25` would be every quarter second, `2` would be once every two seconds|
 |`maxed_batch_step_mode`|`false`|When `false`, you will see the first `max_batch` previews, when `true` you will see previews spread across the batch. Also applies to video frames.|
 |`preview_device`|`null`|`null` (use the default device) or a string with a PyTorch device name like `"cpu"`, `"cuda:0"`, etc. Can be used to run TAESD previews on CPU or other available devices. Not recommended to change this unless you really need to, using the CPU device may prevent out of memory errors but will likely significantly slow down generation.|
+|`preview_dtype`|`bfloat16`|`null` (use the default device) or a string with a PyTorch dtype name like `float32`, `bfloat16`, `float16` (probably the only ones that will work).|
 |`compile_previewer`|`false`|Controls whether the previewer gets compiled with `torch.compile`. May be a boolean or an object in which case the object will be used as argument to `torch.compile`. Note: May cause a delay/memory spike on the first preview.|
 |`oom_fallback`|`latent2rgb`|May be set to `none` or `latent2rgb`. Controls what happens if trying to decode the preview runs out of memory.|
 |`oom_retry`|`true`|If set to `false`, we will give up and use the `oom_fallback` behavior after hitting the first OOM. Otherwise, we'll attempt to decode with the normal previewer each time a preview is requested, even if that previously ran out of memory.|
@@ -71,11 +75,29 @@ More detailed explanation for skipping upscale layers: Latents (the thing you're
 |`video_parallel`|`false`|Use parallel mode when decoding video latents. May actually use more memory than a full VAE decode.|
 |`video_max_frames`|`-1`|Maximum frames to include in a preview. Frame limiting is treated like batch limiting. `-1` means unlimited.|
 |`video_temporal_upscale_level`|`0`|Number of temporal upscale blocks to use, 0 will not do any temporal upscaling, 2 means full temporal upscaling.|
+|`animate_preview`|`none`|One of `none`, `video`, `batch` or `both`. Controls when animated previews are generated. When animating batch previews, batch items will be frames in the animation.|
 
 These defaults are conservative. I would recommend setting `throttle_secs` to something relatively high (like 5-10) especially if you are generating batches at high resolution.
 
 Slightly more detailed explanation for `maxed_batch_step_mode`: If max previews is set to `3` and the batch size is `15` you will see previews for indexes `0, 5, 10`. Or to put it a different way, it steps through the batch by `batch_size / max_previews` rounded up. This behavior may be useful for previewing generations with a high batch count like when using AnimateDiff.
 
+**Last preview endpoint settings defaults:**
+
+The last preview endpoint will serve up either a webpage that auto-updates the last preview `/bleh/last_preview.html` or
+a static image of the last preview `/bleh/last_preview`. It is disabled by default.
+
+|Key|Default|Description|
+|-|-|-|
+|`publish_last_preview`|`false`|Enables publishing last previews.|
+|`publish_last_preview_min_refresh`|`5`|When auto updating last previews, it will occur at most every this many seconds.|
+|`only_animate_last_preview`|`true`|When enabled, animated previews only appear in the last preview endpoint, not the sampler.|
+
+Last preview notes:
+
+* Leaving `only_animate_last_preview` on the default is reasonable. Unless you're using "Nodes 2.0", previews can't animate in the sampler so sending them just wastes resources.
+* If you turn on the last preview endpoint, anyone that can access your ComfyUI instance can see what you're generating. However external access to ComfyUI is disabled by default and if someone can access the instance they can do whatever they want, including seeing your previews and queue history so there isn't much of a risk to turning this on (to the best of my knowledge).
+
+***
 
 **Note**: Other node packs that patch ComfyUI's previewer behavior may interfere with this feature. One I am aware of is [ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite) - if you have displaying animated previews turned on, it will overwrite Bleh's patched previewer. Or possibly, depending on the load order, Bleh will prevent it from working correctly.
 
@@ -279,6 +301,10 @@ just manually enter a list of sigmas. Note: Experimental, not well tested.
 
 Ensures that Bleh's previewer is used. Generally not necessary unless some other custom node pack is overriding the default previewer. The node acts as a bridge for any input type.
 
+## BlehFixGuiderPreviewing
+
+Mostly only necessary for LTX previewing. You absolutely need to pass your guider through this for LTX (2.0, 2.3, 2.3 wide) previews to work. If you're generating videos with a FPS other than the video model's default (regardless of the video model type) then you can set `fps_override` to avoid your animated previews playing with the wrong speed. For LTX 2.3, you'll need to set `prefer_previewer` to `ltxav23` or `ltxav23wide` because there isn't a way for a previewer to detect whether the latent is in LTX 2.0 or LTX 2.3 format. I've been using the wide LTX 2.3 version (linked below) - it's better quality, but possibly somewhat higher resource usage.
+
 ### BlehTAEVideoEncode and BlehTAEVideoDecode
 
 Fast video latent encoding/decoding with models from madebyollin (same person that made TAESD). Supports WAN 2.1, Hunyuan and Mochi. The node has a toggle for parallel mode which is faster but may use a lot of memory.
@@ -289,6 +315,9 @@ You will need to download the models and put them in `models/vae_approx`. Don't 
 * **WAN 2.1**: https://github.com/madebyollin/taehv/blob/main/taew2_1.pth
 * **Hunyean**: https://github.com/madebyollin/taehv/blob/main/taehv.pth
 * **Mochi**: https://github.com/madebyollin/taem1/blob/main/taem1.pth
+* **LTX 2.0**: https://github.com/madebyollin/taehv/blob/main/laeltx_2.pth
+* **LTX 2.3**: https://github.com/madebyollin/taehv/blob/main/laeltx2_3.pth
+* **LTX 2.3 wide**: https://github.com/madebyollin/taehv/blob/2026_03_11_taeltx23_wide/taeltx2_3_wide.pth
 
 *Note*: If you run into issues it's probably a problem with my implementation and not the TAE video models or original inference code.
 

@@ -49,7 +49,6 @@ dum_page = """<!DOCTYPE html>
                 }
                 const newBuffer = await response.arrayBuffer();
                 if (!isDataEqual(currentBuffer, newBuffer)) {
-                    console.log("Updating image");
                     currentBuffer = newBuffer;
 
                     const contentType = response.headers.get('content-type') || '';
@@ -57,9 +56,7 @@ dum_page = """<!DOCTYPE html>
                     const newUrl = URL.createObjectURL(blob);
 
                     document.getElementById('preview-img').src = newUrl;
-                    // document.getElementById('preview-link').href = newUrl;
 
-                    // if (currentObjectURL) { URL.revokeObjectURL(currentObjectURL); }
                     currentObjectURL = newUrl;
                 }
             } catch (err) {
@@ -67,7 +64,6 @@ dum_page = """<!DOCTYPE html>
             } finally {
                 if (urlParams.has('no_refresh')) return;
                 if (nextPollMs === null) { nextPollMs = default_refresh }
-                console.log("Using duration", nextPollMs);
                 setTimeout(checkUpdate, nextPollMs);
             }
         }
