@@ -1070,7 +1070,7 @@ def contrastive_ortho_cfg_base_a(
     output_base = a if output_base_mode == "a" else b
     if (
         not isinstance(final_rescale_target, torch.Tensor)
-        and final_rescale_target not in {"a", "b"}
+        and final_rescale_target not in {"a", "b", "mid"}
     ) or final_rescale_strength == 0.0:
         return guidance if diff_only else guidance.add_(output_base)
     result = guidance.add_(output_base)
@@ -1084,8 +1084,12 @@ def contrastive_ortho_cfg_base_a(
         final_rescale_kwargs["rescale_limit"] = 2.0
     if isinstance(final_rescale_target, torch.Tensor):
         target_b = final_rescale_target.broadcast_to(result.shape)
+    elif final_rescale_target == "b":
+        target_b = b
+    elif final_rescale_target == "mid":
+        target_b = a.lerp(b, 0.5)
     else:
-        target_b = b if final_rescale_target == "b" else a
+        target_b = a
     if final_rescale_energy != 1.0:
         target_b = target_b * final_rescale_energy
     final_result = ortho_blend(
@@ -1445,8 +1449,100 @@ def sp_circular_interpolation(
     diff = b - a
     diff += torch.pi
     diff %= 2 * torch.pi
+    diff -= torch.pi
     diff *= t.broadcast_to(a.shape) if isinstance(t, torch.Tensor) else t
     return diff.add_(a)
+
+
+def fft_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: torch.Tensor | float,
+    *,
+    fft_dims: Sequence[int] = (-2, -1),
+    avg_t_frequency_dims: bool = True,
+    a_phase_offset: float = 0.0,
+    a_magnitude_multiplier: float = 1.0,
+    a_magnitude_power: float = 0.0,
+    b_phase_offset: float = 0.0,
+    b_magnitude_multiplier: float = 1.0,
+    b_magnitude_power: float = 0.0,
+    blended_phase_offset: float = 0.0,
+    blended_magnitude_multiplier: float = 1.0,
+    blended_magnitude_power: float = 0.0,
+    phase_blend_mode: str | Callable = sp_circular_interpolation,
+    phase_blend_kwargs: dict | None = None,
+    phase_blend_multiplier: float = 1.0,
+    phase_blend_offset: float = 0.0,
+    magnitude_blend_mode: str | Callable = torch.lerp,
+    magnitude_blend_kwargs: dict | None = None,
+    magnitude_blend_multiplier: float = 1.0,
+    magnitude_blend_offset: float = 0.0,
+    magnitude_eps: float = 1e-08,
+    **kwargs: Any,
+) -> torch.Tensor:
+    fft_dims = tuple(fft_dims)
+    if a.ndim < 3:
+        raise ValueError("fft blend can only handle tensors with 3+ dimensions.")
+    p_blend = (
+        BLENDING_MODES[phase_blend_mode]
+        if isinstance(phase_blend_mode, str)
+        else phase_blend_mode
+    )
+    m_blend = (
+        BLENDING_MODES[magnitude_blend_mode]
+        if isinstance(magnitude_blend_mode, str)
+        else magnitude_blend_mode
+    )
+    a_f = torch.fft.rfftn(a, dim=fft_dims)
+    a_phase = torch.atan2(a_f.imag, a_f.real)
+    a_mag = a_f.abs()
+    if a_phase_offset != 0.0:
+        a_phase += a_phase_offset
+    if a_magnitude_multiplier != 1.0:
+        a_mag *= a_magnitude_multiplier
+    if a_magnitude_power != 0.0:
+        a_mag = a_mag.add_(magnitude_eps).pow_(a_magnitude_power)
+    b_f = torch.fft.rfftn(b, dim=fft_dims)
+    b_phase = torch.atan2(b_f.imag, b_f.real)
+    b_mag = b_f.abs()
+    if b_phase_offset != 0.0:
+        b_phase += b_phase_offset
+    if b_magnitude_multiplier != 1.0:
+        b_mag *= b_magnitude_multiplier
+    if b_magnitude_power != 0.0:
+        b_mag = b_mag.add_(magnitude_eps).pow_(b_magnitude_power)
+    if not isinstance(t, torch.Tensor):
+        t = a.new_tensor(t)
+    if t.ndim > 1:
+        t = t.broadcast_to(a_f.shape)
+        if avg_t_frequency_dims:
+            t = t.mean(dim=fft_dims, keepdim=True)
+    magnitude_blend_kwargs = kwargs | (
+        magnitude_blend_kwargs if magnitude_blend_kwargs is not None else {}
+    )
+    phase_blend_kwargs = kwargs | (
+        phase_blend_kwargs if phase_blend_kwargs is not None else {}
+    )
+    t_mag = t if magnitude_blend_multiplier == 1.0 else t * magnitude_blend_multiplier
+    if magnitude_blend_offset != 0.0:
+        t_mag = magnitude_blend_offset + t_mag
+    t_phase = t if phase_blend_multiplier == 1.0 else t * phase_blend_multiplier
+    if phase_blend_offset != 0.0:
+        t_phase = phase_blend_offset + t_phase
+    blended_mag = m_blend(a_mag, b_mag, t_mag, **magnitude_blend_kwargs).abs()
+    blended_phase = p_blend(a_phase, b_phase, t_phase, **phase_blend_kwargs)
+    if blended_phase_offset != 0.0:
+        blended_phase += blended_phase_offset
+    if blended_magnitude_multiplier != 1.0:
+        blended_mag *= blended_magnitude_multiplier
+    if blended_magnitude_power != 0.0:
+        blended_mag = blended_mag.add_(magnitude_eps).pow_(blended_magnitude_power)
+    return torch.fft.irfftn(
+        torch.polar(blended_mag, blended_phase),
+        s=tuple(a.shape[d] for d in fft_dims),
+        dim=fft_dims,
+    )
 
 
 class BlendMode:
@@ -1586,10 +1682,12 @@ class BlendMode:
             a = torch.tensor(a, dtype=torch.float64, device="cpu")
         if not isinstance(b, torch.Tensor):
             b = a.new_tensor(b)
-        b = b.broadcast_to(a.shape)
+        if b.ndim > 1:
+            b = b.broadcast_to(a.shape)
         if not isinstance(t, torch.Tensor):
             t = a.new_tensor(t)
-        t = t.broadcast_to(a.shape)
+        if t.ndim > 1:
+            t = t.broadcast_to(a.shape)
         if float_a and (b.numel() != 1 or t.numel() != 1):
             raise ValueError(
                 "When passing the 'a' parameter as a float, 'b' and 't' must either be float or 1-element tensors.",
@@ -2121,6 +2219,9 @@ BLENDING_MODES = {
         visible=False,
     ),
     "sp_circular_interpolation": BlendMode(sp_circular_interpolation),
+    "fft_blend": BlendMode(fft_blend),
+    "fft_phase_blend": BlendMode(partial(fft_blend, magnitude_blend_multiplier=0.0)),
+    "fft_magnitude_blend": BlendMode(partial(fft_blend, phase_blend_multiplier=0.0)),
 }
 
 BLENDING_MODES |= {
