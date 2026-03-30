@@ -65,7 +65,7 @@ previews:
     # When disabled, we use the fallback starting from the first OOM.
     oom_retry: true
 
-    # List of lowercase latent format names from https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/latent_formats.py
+    # List of lowercase latent format names from https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/latent_formats.py
     # If the list is empty, this disables the whitelist. Otherwise, Bleh will
     # only handle previewing for formats in the list.
     whitelist_formats: []
