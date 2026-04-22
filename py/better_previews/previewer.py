@@ -171,6 +171,7 @@ class FallbackPreviewerModel(torch.nn.Module):
         self.device = device
         raw_factors = latent_format.latent_rgb_factors
         raw_bias = latent_format.latent_rgb_factors_bias
+        self.reshape_fun = getattr(latent_format, "latent_rgb_factors_reshape", None)
         factors = torch.tensor(raw_factors, device=device, dtype=dtype).transpose(0, 1)
         bias = (
             torch.tensor(raw_bias, device=device, dtype=dtype)
@@ -192,6 +193,8 @@ class FallbackPreviewerModel(torch.nn.Module):
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.reshape_fun is not None:
+            x = self.reshape_fun(x)
         x = self.lin(x.movedim(1, -1)).movedim(-1, 1)
         x = self.upsample(x).movedim(1, -1)
         return x.add_(1.0).clamp_(0.0, 2.0).mul_(127.5).round_()
@@ -591,7 +594,11 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         return ImageWrapper((result,))
 
     @torch.no_grad()
-    def init_fallback_previewer(self, device: torch.device, dtype: torch.dtype) -> bool:
+    def init_fallback_previewer(
+        self,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> bool:
         if self.latent_format is None:
             return False
         if (
@@ -769,16 +776,16 @@ def bleh_get_previewer(
                 if tae_model_path is not None
                 else None
             )
-        elif vid_info is None and latent_format.taesd_decoder_name is not None:
+        elif vid_info is None and eff_latent_format.taesd_decoder_name is not None:
             taesd_path = folder_paths.get_full_path(
                 "vae_approx",
-                f"{latent_format.taesd_decoder_name}.pth",
+                f"{eff_latent_format.taesd_decoder_name}.pth",
             )
             tae_model = (
                 TAESD(
                     None,
                     taesd_path,
-                    latent_channels=latent_format.latent_channels,
+                    latent_channels=eff_latent_format.latent_channels,
                 )
                 if taesd_path is not None
                 else None
@@ -786,7 +793,7 @@ def bleh_get_previewer(
         if tae_model is not None:
             return BetterPreviewer(
                 taesd=tae_model,
-                latent_format=latent_format,
+                latent_format=eff_latent_format,
                 vid_info=vid_info,
             )
     # Using Latent2RGB either via setting or because no preview model.
