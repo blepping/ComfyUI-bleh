@@ -613,6 +613,8 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 dtype=dtype,
             )
             return True
+        if self.latent_format.latent_rgb_factors is None:
+            return False
         self.fallback_previewer_model = FallbackPreviewerModel(
             self.latent_format,
             device=device,
