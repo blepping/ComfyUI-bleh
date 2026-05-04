@@ -1441,17 +1441,161 @@ def tiered_blend(
     return wrapped_blend_function(a, b, t, **kwargs)
 
 
+# Shortest path circular interpolation (with the default params)
 def sp_circular_interpolation(
     a: torch.Tensor,
     b: torch.Tensor,
     t: torch.Tensor | float,
+    *,
+    period: float | None = 2.0 * torch.pi,
+    period_scale: float = 1.0,
+    # Optional: lock the final output inside the bounds
+    wrap_result: bool = False,
+    # Only needed if wrap_result is True
+    lower_bound: float | None = None,
+    lower_bound_scale: float = 1.0,
+    start_dim: int = 1,
+    end_dim: int | None = None,
+    elementwise: bool = False,
+    minimize_range: bool = False,
+    diff_preserve_sign: bool = False,
+    result_preserve_sign: bool = False,
+    eps: float = 1e-08,
 ) -> torch.Tensor:
-    diff = b - a
-    diff += torch.pi
-    diff %= 2 * torch.pi
-    diff -= torch.pi
+    if period is None:
+        if start_dim < 1:
+            start_dim = a.ndim + start_dim
+        end_dim = (
+            a.ndim
+            if end_dim is None
+            else (a.ndim + end_dim if end_dim < 0 else end_dim)
+        ) + 1
+        dims = tuple(range(start_dim, end_dim))
+        period = (torch.minimum if minimize_range else torch.maximum)(
+            a.abs()
+            if elementwise
+            else a.abs().amax(
+                dim=dims,
+                keepdim=True,
+            ),
+            b.abs()
+            if elementwise
+            else b.abs().amax(
+                dim=dims,
+                keepdim=True,
+            ),
+        )
+        period = period.mul_(2.0).clamp_min_(eps)
+    else:
+        period = max(eps, abs(period))
+    if period_scale != 1.0:
+        period = period * period_scale
+    if wrap_result and lower_bound is None:
+        lower_bound = period * (-0.5 * lower_bound_scale)
+    diff_orig = diff = b - a
+    half_period = period * 0.5
+
+    # Wrap the difference to the shortest path around the "circle"
+    diff = diff + half_period
+    diff %= period
+    diff -= half_period
+    if diff_preserve_sign:
+        diff = diff.copysign_(diff_orig)
+
     diff *= t.broadcast_to(a.shape) if isinstance(t, torch.Tensor) else t
-    return diff.add_(a)
+    result = diff.add_(a)
+
+    if wrap_result:
+        result_orig = result
+        result = result - lower_bound
+        result %= period
+        result += lower_bound
+        if result_preserve_sign:
+            result = result.copysign_(result_orig)
+    return result
+
+
+# Computes the matrix logarithm using complex eigendecomposition.
+# Safe for batched Rotation matrices (Vh) and Covariance matrices.
+# Matrice must be diagonalizable.
+def matrix_log(
+    m: torch.Tensor,
+    *,
+    eps: float = 1e-06,
+    ieps: complex = 1e-08j,
+    dtype: torch.dtype | None = torch.complex128,
+    keep_dtype: bool = True,
+) -> torch.Tensor:
+    if m.ndim not in {2, 3} or m.shape[-2] != m.shape[-1]:
+        raise ValueError("matrix_log only supports diagonalizable square matrices")
+    # 1. Add a tiny diagonal epsilon to prevent singular matrix errors / log(0)
+    eye = torch.eye(
+        m.shape[-1],
+        device=m.device,
+        dtype=m.dtype if dtype is None else dtype,
+    ).mul_(eps)
+    m_safe = m.to(dtype=eye.dtype) + eye
+
+    # 2. Eigendecomposition
+    # L = Eigenvalues, V = Eigenvectors
+    el, ev = torch.linalg.eig(m_safe)
+
+    # 3. Take the natural logarithm of the complex eigenvalues
+    # With a tiny complex epsilon to prevent log(0+0j) NaNs
+    log_l = el.add_(ieps).log_()
+
+    # 4. Reconstruct the matrix: V @ diag(log_L) @ V^-1
+    v_inv = torch.linalg.solve(
+        ev,
+        torch.eye(ev.shape[-1], device=ev.device, dtype=ev.dtype),
+    )
+    log_m = (ev * log_l.unsqueeze(-2)) @ v_inv
+
+    # 5. The result should be purely real (the imaginary parts cancel out to ~0)
+    return log_m.real if keep_dtype else log_m.real.to(dtype=m.dtype)
+
+
+# Suitable for blending coordinate spaces like the Vh component of SVD, covariance, etc.
+# Something like 0.5 is similar to LERP.
+# Values above 1 should be similar to CFG, but for for coordinate spaces.
+def geodesic_square_matrix(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: torch.Tensor | float,
+    *,
+    use_pinv: bool = True,
+    # Allow non square matrices (but only operate on the square subset)
+    lax: bool = True,
+) -> torch.Tensor:
+    if a.shape != b.shape:
+        errstr = f"Input shape mismatch, A {a.shape} != B {b.shape}"
+        raise ValueError(errstr)
+    if a.ndim == 2:
+        x, y = a.shape
+    elif a.ndim == 3:
+        x, y = a.shape[1:]
+    else:
+        x = y = None
+    if not (x and y) or (not lax and x != y):
+        raise ValueError(
+            "geodesic_square_matrix only supports square matrices (batch dimension optional)",
+        )
+    a_orig = a
+    if x != y:
+        minsz = min(x, y)
+        a = a[..., :minsz, :minsz]
+        b = b[..., :minsz, :minsz]
+    inv_op = torch.linalg.pinv if use_pinv else torch.linalg.inv
+    mlg = matrix_log(a @ inv_op(b))
+    velocity = torch.linalg.matrix_exp(
+        mlg * (t.to(dtype=mlg.dtype) if isinstance(t, torch.Tensor) else t),
+    )
+    result = (velocity @ b.to(velocity.dtype)).to(dtype=a.dtype)
+    if x == y:
+        return result
+    a_orig = a_orig.clone()
+    a_orig[..., :minsz, :minsz] = result
+    return a_orig
 
 
 def fft_blend(
@@ -1543,6 +1687,166 @@ def fft_blend(
         s=tuple(a.shape[d] for d in fft_dims),
         dim=fft_dims,
     )
+
+
+def align_decomp(
+    left: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    right: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    *,
+    align_mode: str = "joint",
+    invert: bool = False,
+    eps: float = 1e-06,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    align_mode = align_mode.strip().lower()
+    if align_mode not in {"u", "v", "vh", "joint"}:
+        raise ValueError("Align mode must be one of u, v[h], or joint")
+    align_mode = align_mode[0]
+
+    ul, sl, vl = left
+    ur, sr, vr = right
+
+    def get_sim(t_right: torch.Tensor, t_left: torch.Tensor) -> torch.Tensor:
+        norm_right, norm_left = (
+            torch.linalg.vector_norm(t, dim=-2, keepdim=True).clamp_min_(eps)
+            for t in (t_right, t_left)
+        )
+        return (t_right / norm_right).mT @ (t_left / norm_left)
+
+    sim_u = get_sim(ur, ul) if align_mode in "uj" else None
+    sim_vh = get_sim(vr.mT, vl.mT) if align_mode in "vj" else None
+    sim = (
+        sim_u * sim_vh
+        if align_mode == "j"
+        else (sim_u if sim_u is not None else sim_vh)
+    )
+
+    match_idx = (sim.abs().argmin if invert else sim.abs().argmax)(dim=-1)
+    signs = (
+        (sim if align_mode != "j" else sim_u)
+        .gather(
+            dim=-1,
+            index=match_idx.unsqueeze(-1),
+        )
+        .sign_()
+    )
+    return (
+        ul.gather(
+            dim=-1,
+            index=match_idx.unsqueeze(-2).expand(*ul.shape[:-1], sr.shape[-1]),
+        )
+        * signs.mT,
+        sl.gather(dim=-1, index=match_idx),
+        vl.gather(
+            dim=-2,
+            index=match_idx.unsqueeze(-1).expand(
+                *vl.shape[:-2],
+                sr.shape[-1],
+                vl.shape[-1],
+            ),
+        )
+        * signs,
+    )
+
+
+def do_decomp(
+    t: torch.Tensor,
+    *,
+    mode: str = "svd",
+    **kwargs: Any,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if t.ndim > 2:
+        t = t.flatten(start_dim=2).mT
+    if mode == "svd":
+        return torch.linalg.svd(t, full_matrices=False)
+    if mode == "svd_lowrank":
+        q = kwargs.pop("q", None)
+        u, s, v = torch.svd_lowrank(t, q=q if q is not None else t.shape[-1], **kwargs)
+        return u, s, v.mT
+    if mode == "qr":
+        u, r_mat = torch.linalg.qr(t)
+        s = r_mat.diagonal(dim1=-2, dim2=-1)
+        vh = (1.0 / s).masked_fill_(s == 0.0, 1.0 / 1e-08).unsqueeze(-1) * r_mat
+        return u, s, vh
+    raise ValueError("Bad decomp mode")
+
+
+def decomp_rank_blend(
+    # 3+ dimensional tensors will get flattened starting from dimension 2 and
+    # then transposed for the decomposition. I.E. (B, C, H, W) -> (B, H*W, C)
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    t_s: float | None = None,
+    t_v: float | None = None,
+    flip: bool = False,
+    decomp_mode: str = "svd",
+    align_mode: str = "joint",
+    align_invert: bool = False,
+    blend_components: str = "usv",
+    n_iter: int = 6,
+    q: int | None = None,
+) -> torch.Tensor:
+    if a.ndim < 2 or b.ndim < 2:
+        raise ValueError("Can only only handle 2+ dimensional tensors")
+    if isinstance(t, torch.Tensor):
+        t = t.mean().clamp_(0, 1).detach().cpu().item()
+    else:
+        t = min(1.0, max(0.0, float(t)))
+    t, t_s, t_v = (
+        min(1.0, max(0.0, float(val)))
+        for val in (t, t_s if t_s is not None else t, t_v if t_v is not None else t)
+    )
+    if t == 0.0 and t_s == 0.0 and t_v == 0:
+        return a.clone()
+
+    dl = do_decomp(a, mode=decomp_mode, niter=n_iter, q=q)
+    dr = do_decomp(b, mode=decomp_mode, niter=n_iter, q=q)
+
+    if (align_mode := align_mode.strip().lower()) in {"joint", "u", "v", "vh"}:
+        dl = align_decomp(
+            dl,
+            dr,
+            align_mode=align_mode,
+            invert=align_invert,
+        )
+    ((ua, sa, vha), (ub, sb, vhb)) = dl, dr
+    blend_components = blend_components.strip().lower()
+    rank = sa.shape[-1]
+    size_u, size_s, size_v = (
+        min(rank, max(0, math.ceil(rank * val))) for val in (t, t_s, t_v)
+    )
+    rs_u, rs_s, rs_v = (
+        slice(None, sz) if not flip else slice(-sz, None)
+        for sz in (size_u, size_s, size_v)
+    )
+    if "u" in blend_components:
+        ua[..., rs_u] = ub[..., rs_u]
+    if "s" in blend_components:
+        sa[..., rs_s] = sb[..., rs_s]
+    if "v" in blend_components:
+        vha[..., rs_v, :] = vhb[..., rs_v, :]
+    return (ua @ sa.diag_embed() @ vha).mT.reshape(a.shape)
+
+
+def chain_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *args: Any,
+    chain_iterations: int = 1,
+    chain_blend_mode: str | Callable = torch.lerp,
+    **kwargs: Any,
+) -> torch.Tensor:
+    if chain_iterations < 1:
+        return a.clone()
+    fun = (
+        BLENDING_MODES[chain_blend_mode]
+        if isinstance(chain_blend_mode, str)
+        else chain_blend_mode
+    )
+    for _ in range(chain_iterations):
+        b = fun(a, b, *args, **kwargs)
+    return b
 
 
 class BlendMode:
@@ -2219,9 +2523,12 @@ BLENDING_MODES = {
         visible=False,
     ),
     "sp_circular_interpolation": BlendMode(sp_circular_interpolation),
+    "geodesic_square_matrix": BlendMode(geodesic_square_matrix),
     "fft_blend": BlendMode(fft_blend),
     "fft_phase_blend": BlendMode(partial(fft_blend, magnitude_blend_multiplier=0.0)),
     "fft_magnitude_blend": BlendMode(partial(fft_blend, phase_blend_multiplier=0.0)),
+    "decomp_rank_blend": BlendMode(decomp_rank_blend),
+    "chain": BlendMode(chain_blend),
 }
 
 BLENDING_MODES |= {
