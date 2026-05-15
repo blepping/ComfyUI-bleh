@@ -1,5 +1,5 @@
 # Copy this file to blehconfig.yaml
-betterTaesdPreviews:
+previews:
     # If disabled, will use the old ComfyUI previewer.
     enabled: true
 
@@ -36,7 +36,13 @@ betterTaesdPreviews:
     # You may set it to a specific dtype: float32, float16, bfloat16
     # Setting it to "keep" or null just leaves the dtype alone (which is probably float32).
     # Setting it to "vae" will use whatever dtype ComfyUI is set to use for VAE.
-    preview_dtype: null
+    preview_dtype: bfloat16
+
+    # Uses non-blocking transfers for previews when the device supports it.
+    # Not recommended as it is extremely likely to corrupt previews, especially if the previewer
+    # is relatively slow or the latent is large (video models, Chroma Radiance). However,
+    # it might decrease the performance impact of previewing.
+    preview_non_blocking: false
 
     # Allows skipping upscale layers in the TAESD model, may increase performance when previewing large images or batches.
     # May be set to -1 (conservative) or -2 (aggressive) to automatically calculate how many to skip. See README.md for details.
@@ -59,7 +65,7 @@ betterTaesdPreviews:
     # When disabled, we use the fallback starting from the first OOM.
     oom_retry: true
 
-    # List of lowercase latent format names from https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/latent_formats.py
+    # List of lowercase latent format names from https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/latent_formats.py
     # If the list is empty, this disables the whitelist. Otherwise, Bleh will
     # only handle previewing for formats in the list.
     whitelist_formats: []
@@ -78,3 +84,30 @@ betterTaesdPreviews:
     # Number of temporal upscale blocks to run. 2 is the maximum and will fully decode
     # the latent into image frames.
     video_temporal_upscale_level: 0
+
+    # One of:
+    #   none: Never use animated previews.
+    #   video: Use animated previews for video generations.
+    #   batch: Use animated previews for batch generations (batch items will be frames.)
+    #   both: Use animated previews for video and batch generations.
+    animate_preview: none
+
+    # When enabled, this will add `/bleh/last_preview.html` and `/bleh/last_preview` paths
+    # under whatever URI you use to access ComfyUI. The HTML version will serve a webpage
+    # that shows the last preview and automatically updates. The non-HTML URI will serve
+    # an image (possibly animated) of the last preview.
+    # NOTE: When this is enabled, if someone can access your ComfyUI instance then they
+    # can see what you're generating, but they already could do that just less conveniently.
+    # Access from external hosts is not something ComfyUI enables by default.
+    publish_last_preview: false
+
+    # When publishing last previews, the HTML endpoint will only refresh the image at most
+    # once every this many seconds.
+    publish_last_preview_min_refresh: 5
+
+    # Only applies when you have a preview that would be animated and publish_last_preview
+    # is enabled. When this is turned on, the image sent to ComfyUI for the preview is one
+    # frame, while the image under the last preview may be animated. You probably want to
+    # leave this on the default because previews can only animated with "Nodes 2.0" which
+    # you probably don't want to use, so sending an animated preview to the sampler is pointless.
+    only_animate_last_preview: true

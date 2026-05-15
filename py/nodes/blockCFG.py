@@ -1,4 +1,60 @@
-from functools import partial
+import math
+from dataclasses import dataclass
+from enum import Enum, auto
+from functools import partial, reduce
+
+import torch
+from tqdm import tqdm
+
+
+class BlockType(Enum):
+    INPUT = auto()
+    OUTPUT = auto()
+    MIDDLE = auto()
+    ATTN_Q = auto()
+    ATTN_K = auto()
+    ATTN_V = auto()
+    ATTN = auto()
+
+
+class BlendType(Enum):
+    DIFF = auto()
+    RESULT = auto()
+
+
+class CondType(Enum):
+    COND = auto()
+    UNCOND = auto()
+    BOTH = auto()
+
+
+@dataclass
+class BlockCFGItem:
+    start_sigma: float
+    end_sigma: float
+    block_type: BlockType
+    target_type: BlendType
+    cond_type: CondType
+    block_num: int
+    scale: float
+    skip_mode: bool
+
+
+class BlockCFG:
+    start_sigma: float
+    end_sigma: float
+    block_types: frozenset[BlockType]
+    verbose: bool = True
+
+    def __init__(self, items: tuple[BlockCFGItem, ...]):
+        self.start_sigma, self.end_sigma = reduce(
+            lambda old, new: (min(old[0], new[0]), max(old[1], new[1])),
+            ((i.start_sigma, i.end_sigma) for i in items),
+            (math.inf, math.inf * -1),
+        )
+        self.block_types = frozenset(i.block_type for i in items)
+
+    # def check_applies(self,
 
 
 class BlockCFGBleh:
@@ -123,6 +179,7 @@ class BlockCFGBleh:
         reverse = apply_to != "cond"
 
         def check_applies(block_list, transformer_options):
+            tqdm.write(f"* BLOCKCFG: tf={transformer_options}")
             cond_or_uncond = transformer_options["cond_or_uncond"]
             if (
                 not (0 in cond_or_uncond and 1 in cond_or_uncond)
@@ -140,6 +197,13 @@ class BlockCFGBleh:
                 return -1 in block_list
             return block_def in {-1, transformer_options.get("transformer_index")}
 
+        def apply_cfg_fun_(tensor: torch.Tensor, primary_offset: int) -> torch.Tensor:
+            full_batch = tensor.shape[0]
+            if full_batch % 2:
+                raise RuntimeError("Batch size must be multiple of 2")
+            batch = full_batch // 2
+            diff = tensor[:batch, ...] - tensor[batch:, ...]
+
         def apply_cfg_fun(tensor, primary_offset):
             secondary_offset = 0 if primary_offset == 1 else 1
             if reverse:
@@ -156,12 +220,15 @@ class BlockCFGBleh:
             ).mul_(scale)
             return result
 
+        mid_patch = None
+
         def non_output_block_patch(h, transformer_options, *, block_list):
+            nonlocal mid_patch
+            # print("\nSET????", mid_patch)
+            if mid_patch is not None:
+                mid_patch._bleh_set_topts(transformer_options)
             cond_or_uncond = transformer_options["cond_or_uncond"]
-            if not check_applies(
-                block_list,
-                transformer_options,
-            ):
+            if not block_list or not check_applies(block_list, transformer_options):
                 return h
             return apply_cfg_fun(h, cond_or_uncond.index(0))
 
@@ -180,7 +247,55 @@ class BlockCFGBleh:
             )
 
         m = model.clone()
-        if input_blocks:
+
+        if middle_blocks:
+            # print("******** MIDDLE")
+            try:
+                mb = model.get_model_object("diffusion_model.middle_block.0")
+            except AttributeError:
+                mb = None
+            orig_forward = getattr(mb, "forward", None)
+            if mb is None or orig_forward is None:
+                raise ValueError("Could not get middle block or forward")
+
+            class MBForward:
+                def __init__(self, orig_forward):
+                    real_orig_forward = orig_forward
+                    while temp := getattr(
+                        real_orig_forward, "_bleh_orig_forward", None
+                    ):
+                        real_orig_forward = temp
+                    orig_forward = real_orig_forward
+                    self._bleh_orig_forward = orig_forward
+                    self._bleh_topts = None
+
+                def _bleh_set_topts(self, transformer_options: dict) -> None:
+                    # if self._bleh_topts:
+                    #     return
+                    cond_or_uncond = transformer_options["cond_or_uncond"]
+                    self._bleh_topts = {
+                        "cond_or_uncond": cond_or_uncond.clone()
+                        if isinstance(cond_or_uncond, torch.Tensor)
+                        else cond_or_uncond,
+                        "sigmas": transformer_options["sigmas"].clone(),
+                        "block": ("middle", 0),
+                    }
+
+                def __call__(self, *args: list, **kwargs: dict) -> torch.Tensor:
+                    result = self._bleh_orig_forward(*args, **kwargs)
+                    try:
+                        return non_output_block_patch(
+                            result,
+                            self._bleh_topts,
+                            block_list=middle_blocks,
+                        )
+                    finally:
+                        self._bleh_topts = None
+
+            mid_patch = MBForward(orig_forward)
+            m.add_object_patch("diffusion_model.middle_block.0.forward", mid_patch)
+
+        if input_blocks or middle_blocks:
             (
                 m.set_model_input_block_patch_after_skip
                 if skip_mode
@@ -188,11 +303,7 @@ class BlockCFGBleh:
             )(
                 partial(non_output_block_patch, block_list=input_blocks),
             )
-        if middle_blocks:
-            m.set_model_patch(
-                partial(non_output_block_patch, block_list=middle_blocks),
-                "middle_block_patch",
-            )
+
         if output_blocks:
             m.set_model_output_block_patch(
                 partial(output_block_patch, block_list=output_blocks),

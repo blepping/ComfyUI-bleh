@@ -36,10 +36,15 @@ NODE_CLASS_MAPPINGS = {
     "BlehPlug": misc.BlehPlug,
     "BlehRefinerAfter": refinerAfter.BlehRefinerAfter,
     "BlehSageAttentionSampler": sageAttention.BlehSageAttentionSampler,
+    "BlehAdvancedAttentionSampler": sageAttention.BlehAdvancedAttentionSampler,
     "BlehSetSamplerPreset": samplers.BlehSetSamplerPreset,
     "BlehSetSigmas": misc.BlehSetSigmas,
     "BlehTAEVideoDecode": taevid.TAEVideoDecode,
     "BlehTAEVideoEncode": taevid.TAEVideoEncode,
+    "BlehModelProcessLatentIn": misc.BlehModelProcessLatentIn,
+    "BlehModelProcessLatentOut": misc.BlehModelProcessLatentOut,
+    "BlehFixGuiderPreviewing": misc.BlehFixGuiderPreviewing,
+    "BlehBlendConditioning": misc.BlehBlendConditioning,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

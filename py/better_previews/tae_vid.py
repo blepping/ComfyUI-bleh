@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 from torch import nn
@@ -24,33 +24,75 @@ class TWorkItem(NamedTuple):
     block_index: int
 
 
-def conv(n_in: int, n_out: int, **kwargs: dict) -> nn.Conv2d:
-    return nn.Conv2d(n_in, n_out, 3, padding=1, **kwargs)
+def conv(
+    n_in: int,
+    n_out: int,
+    *,
+    kernel_size: int = 3,
+    stride: int = 1,
+    padding: int = 1,
+    **kwargs: Any,
+) -> nn.Conv2d:
+    return nn.Conv2d(
+        n_in,
+        n_out,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        **kwargs,
+    )
 
 
 class Clamp(nn.Module):
     @classmethod
     def forward(cls, x: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(x / 3) * 3
+        return (x / 3.0).tanh_().mul_(3.0)
 
 
 class MemBlock(nn.Module):
-    def __init__(self, n_in, n_out):
+    def __init__(
+        self,
+        n_in: int,
+        n_out: int,
+        *,
+        wide: bool = False,
+    ):
         super().__init__()
-        self.conv = nn.Sequential(
-            conv(n_in * 2, n_out),
-            nn.ReLU(inplace=True),
-            conv(n_out, n_out),
-            nn.ReLU(inplace=True),
-            conv(n_out, n_out),
-        )
+        groups = max(1, n_out // 64) if wide else 1
+        if wide:
+            if n_out % groups != 0:
+                errstr = f"Bad n_out {n_out} parameter for wide MemBlock, must be divisible by 64"
+                raise ValueError(errstr)
+            self.conv = nn.Sequential(
+                conv(n_in * 2, n_out, kernel_size=1, padding=0),
+                nn.ReLU(inplace=True),
+                conv(n_out, n_out, groups=groups),
+                nn.ReLU(inplace=True),
+                conv(n_in, n_out, kernel_size=1, padding=0),
+                nn.ReLU(inplace=True),
+                conv(n_out, n_out, groups=groups),
+            )
+        else:
+            self.conv = nn.Sequential(
+                conv(n_in * 2, n_out),
+                nn.ReLU(inplace=True),
+                conv(n_out, n_out),
+                nn.ReLU(inplace=True),
+                conv(n_out, n_out),
+            )
         self.skip = (
             nn.Conv2d(n_in, n_out, 1, bias=False) if n_in != n_out else nn.Identity()
         )
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor, past: torch.Tensor) -> torch.Tensor:
-        return self.act(self.conv(torch.cat((x, past), 1)) + self.skip(x))
+        result = self.conv(torch.cat((x, past), 1))
+        result += self.skip(x)
+        return self.act(result)
+
+
+def make_memblocks(n: int, *, count: int = 3, **kwargs: Any) -> tuple[MemBlock, ...]:
+    return tuple(MemBlock(n, n, **kwargs) for _ in range(count))
 
 
 class TPool(nn.Module):
@@ -183,8 +225,8 @@ class TAEVidContext:
         return torch.stack(out, 1)
 
 
-class TAEVid(nn.Module):
-    temporal_upscale_blocks = 2
+class TAEVidBase(nn.Module):
+    temporal_upscale_blocks = 3
     spatial_upscale_blocks = 3
     _nf = (256, 128, 64, 64)
 
@@ -195,67 +237,106 @@ class TAEVid(nn.Module):
         vmi: VideoModelInfo,
         image_channels: int = 3,
         device="cpu",
-        decoder_time_upscale=(True, True),
-        decoder_space_upscale=(True, True, True),
+        encoder_time_downscale_level: int = 3,
+        decoder_time_upscale_level: int = 3,
+        decoder_space_upscale_level: int = 3,
     ):
-        n_f = self._nf
         super().__init__()
         self.vmi = vmi
-        self.latent_channels = vmi.latent_format.latent_channels
         self.image_channels = image_channels
+        self.latent_channels = vmi.latent_format.latent_channels
         self.patch_size = vmi.patch_size
-        self.encoder = nn.Sequential(
-            conv(image_channels * self.patch_size**2, 64),
-            nn.ReLU(inplace=True),
-            TPool(64, 2),
-            conv(64, 64, stride=2, bias=False),
-            MemBlock(64, 64),
-            MemBlock(64, 64),
-            MemBlock(64, 64),
-            TPool(64, 2),
-            conv(64, 64, stride=2, bias=False),
-            MemBlock(64, 64),
-            MemBlock(64, 64),
-            MemBlock(64, 64),
-            TPool(64, 1),
-            conv(64, 64, stride=2, bias=False),
-            MemBlock(64, 64),
-            MemBlock(64, 64),
-            MemBlock(64, 64),
-            conv(64, vmi.latent_format.latent_channels),
+        encoder_time_downscale = self._get_encoder_flags(
+            time_level=encoder_time_downscale_level,
         )
-        self.frames_to_trim = 2 ** sum(decoder_time_upscale) - 1
-        self.decoder = nn.Sequential(
-            Clamp(),
-            conv(vmi.latent_format.latent_channels, n_f[0]),
-            nn.ReLU(inplace=True),
-            MemBlock(n_f[0], n_f[0]),
-            MemBlock(n_f[0], n_f[0]),
-            MemBlock(n_f[0], n_f[0]),
-            nn.Upsample(scale_factor=2 if decoder_space_upscale[0] else 1),
-            TGrow(n_f[0], 1),
-            conv(n_f[0], n_f[1], bias=False),
-            MemBlock(n_f[1], n_f[1]),
-            MemBlock(n_f[1], n_f[1]),
-            MemBlock(n_f[1], n_f[1]),
-            nn.Upsample(scale_factor=2 if decoder_space_upscale[1] else 1),
-            TGrow(n_f[1], 2 if decoder_time_upscale[0] else 1),
-            conv(n_f[1], n_f[2], bias=False),
-            MemBlock(n_f[2], n_f[2]),
-            MemBlock(n_f[2], n_f[2]),
-            MemBlock(n_f[2], n_f[2]),
-            nn.Upsample(scale_factor=2 if decoder_space_upscale[2] else 1),
-            TGrow(n_f[2], 2 if decoder_time_upscale[1] else 1),
-            conv(n_f[2], n_f[3], bias=False),
-            nn.ReLU(inplace=True),
-            conv(n_f[3], image_channels * self.patch_size**2),
+        decoder_time_upscale, decoder_space_upscale = self._get_decoder_flags(
+            time_level=decoder_time_upscale_level,
+            space_level=decoder_space_upscale_level,
         )
+        encoder_strides = tuple(1 + int(flag) for flag in encoder_time_downscale)
+        decoder_strides = tuple(1 + int(flag) for flag in decoder_time_upscale)
+        decoder_scale_factors = tuple(1 + int(flag) for flag in decoder_space_upscale)
+        self.encoder = self._build_encoder(strides=encoder_strides)
+        self.decoder = self._build_decoder(
+            strides=decoder_strides,
+            scale_factors=decoder_scale_factors,
+        )
+        self.t_upscale = 2 ** sum(decoder_time_upscale)
+        self.t_downscale = 2 ** sum(encoder_time_downscale)
+        self.frames_to_trim = self.t_upscale - 1
         if checkpoint_path is None:
             return
-        self.load_state_dict(
-            self.patch_tgrow_layers(
-                torch.load(checkpoint_path, map_location=device, weights_only=True),
-            ),
+        sd = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        self.load_state_dict(self.patch_tgrow_layers(sd))
+
+    def _get_decoder_flags(
+        self,
+        *,
+        time_level: int = 3,
+        space_level: int = 3,
+    ) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
+        decoder_time_upscale = tuple(i < time_level for i in range(3))
+        decoder_space_upscale = tuple(i < space_level for i in range(3))
+        return decoder_time_upscale, decoder_space_upscale
+
+    def _get_encoder_flags(
+        self,
+        *,
+        time_level: int = 3,
+    ) -> tuple[bool, ...]:
+        return tuple(i < time_level for i in range(3))
+
+    def _build_decoder(
+        self,
+        *,
+        strides: tuple[int, ...],
+        scale_factors: tuple[int, ...],
+        memblock_kwargs: dict[str, Any] | None = None,
+    ) -> nn.Module:
+        if memblock_kwargs is None:
+            memblock_kwargs = {}
+        n_f = self._nf
+        return nn.Sequential(
+            Clamp(),
+            conv(self.latent_channels, n_f[0]),
+            nn.ReLU(inplace=True),
+            *make_memblocks(n_f[0], **memblock_kwargs),
+            nn.Upsample(scale_factor=scale_factors[0]),
+            TGrow(n_f[0], strides[0]),
+            conv(n_f[0], n_f[1], bias=False),
+            *make_memblocks(n_f[1], **memblock_kwargs),
+            nn.Upsample(scale_factor=scale_factors[1]),
+            TGrow(n_f[1], strides[1]),
+            conv(n_f[1], n_f[2], bias=False),
+            *make_memblocks(n_f[2], **memblock_kwargs),
+            nn.Upsample(scale_factor=scale_factors[2]),
+            TGrow(n_f[2], strides[2]),
+            conv(n_f[2], n_f[3], bias=False),
+            nn.ReLU(inplace=True),
+            conv(n_f[3], self.image_channels * self.patch_size**2),
+        )
+
+    def _build_encoder(
+        self,
+        *,
+        strides: tuple[int, ...],
+        memblock_kwargs: dict[str, Any] | None = None,
+    ) -> nn.Module:
+        if memblock_kwargs is None:
+            memblock_kwargs = {}
+        return nn.Sequential(
+            conv(self.image_channels * self.patch_size**2, 64),
+            nn.ReLU(inplace=True),
+            TPool(64, strides[0]),
+            conv(64, 64, stride=2, bias=False),
+            *make_memblocks(64, **memblock_kwargs),
+            TPool(64, strides[1]),
+            conv(64, 64, stride=2, bias=False),
+            *make_memblocks(64, **memblock_kwargs),
+            TPool(64, strides[2]),
+            conv(64, 64, stride=2, bias=False),
+            *make_memblocks(64, **memblock_kwargs),
+            conv(64, self.latent_channels),
         )
 
     def patch_tgrow_layers(self, sd: dict) -> dict:
@@ -304,8 +385,15 @@ class TAEVid(nn.Module):
         show_progress=False,
     ) -> torch.Tensor:
         model = self.decoder if decode else self.encoder
-        if not decode and self.vmi.patch_size > 1:
-            x = F.pixel_unshuffle(x, self.patch_size)
+        if not decode:
+            if self.vmi.patch_size > 1:
+                x = F.pixel_unshuffle(x, self.patch_size)
+            # Pad handling copied from https://github.com/madebyollin
+            if x.shape[1] % self.t_downscale != 0:
+                # pad at end to multiple of self.t_downscale
+                n_pad = self.t_downscale - x.shape[1] % self.t_downscale
+                padding = x[:, -1:].repeat_interleave(n_pad, dim=1)
+                x = torch.cat((x, padding), 1)
         if parallel:
             result = self.apply_parallel(x, model, show_progress=show_progress)
         else:
@@ -324,3 +412,61 @@ class TAEVid(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.c(x)
+
+
+class TAEVid(TAEVidBase):
+    def _get_decoder_flags(
+        self,
+        *,
+        time_level: int = 3,
+        space_level: int = 3,
+    ) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
+        tu, su = super()._get_decoder_flags(
+            time_level=time_level,
+            space_level=space_level,
+        )
+        return (False, *tu[:2]), su
+
+    def _get_encoder_flags(
+        self,
+        *,
+        time_level: int = 3,
+    ) -> tuple[bool, ...]:
+        return (*super()._get_encoder_flags(time_level=time_level)[:2], False)
+
+
+class TAEVidLTX2(TAEVidBase):
+    def _get_decoder_flags(
+        self,
+        *,
+        time_level: int = 3,
+        space_level: int = 3,
+    ) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
+        _tu, su = super()._get_decoder_flags(
+            time_level=time_level,
+            space_level=space_level,
+        )
+        return (True, True, True), su
+
+    def _get_encoder_flags(
+        self,
+        *,
+        time_level: int = 3,  # noqa: ARG002
+    ) -> tuple[bool, ...]:
+        return (True, True, True)
+
+
+class TAEVidLTX23Wide(TAEVidLTX2):
+    def __init__(self, *args: Any, **kwargs: Any):
+        self._nf = (1024, 512, 256, 64)
+        super().__init__(*args, **kwargs)
+
+    def _build_decoder(
+        self,
+        *args: Any,
+        memblock_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> nn.Module:
+        memblock_kwargs = {} if memblock_kwargs is None else memblock_kwargs.copy()
+        memblock_kwargs["wide"] = True
+        return super()._build_decoder(*args, memblock_kwargs=memblock_kwargs, **kwargs)

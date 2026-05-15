@@ -22,6 +22,12 @@ def blep_init():
     sys.modules["_blepping_integrations"] = bi
     nodes._blepping_integrations = bi  # noqa: SLF001
     samplers.add_sampler_presets()
+    if settings.SETTINGS.btp_publish_last_preview:
+        from .py.better_previews import last_preview  # noqa: PLC0415
+
+        last_preview.init_routes(
+            min_refresh=settings.SETTINGS.btp_publish_last_preview_min_refresh,
+        )
 
 
 blep_init()

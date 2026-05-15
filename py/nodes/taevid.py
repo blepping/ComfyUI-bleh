@@ -14,16 +14,31 @@ class TAEVideoNodeBase:
     FUNCTION = "go"
     CATEGORY = "latent"
 
+    _download_map = {  # noqa: RUF012
+        "hunyuanvideo": ("taehv.pth", "taehv"),
+        "ltxv": ("taeltx_2.pth", "taehv"),
+        "ltxv23": ("taeltx2_3.pth", "taehv"),
+        "ltxv23wide": ("taeltx2_3_wide.pth", "taehv"),
+        "mochi": ("taem1.pth", "taem1"),
+        "wan21": ("taew2_1.pth", "taehv"),
+        "wan22": ("taew2_2.pth", "taehv"),
+    }
+
     @classmethod
     def INPUT_TYPES(cls) -> dict:
         return {
             "required": {
-                "latent_type": (("wan21", "wan22", "hunyuanvideo", "mochi"),),
+                "latent_type": (
+                    tuple(cls._download_map),
+                    {
+                        "tooltip": "Use ltxv for LTX-2 AV.",
+                    },
+                ),
                 "parallel_mode": (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "tooltip": "Parallel mode is faster but requires more memory.",
+                        "tooltip": "Parallel mode may be faster but requires more memory.",
                     },
                 ),
             },
@@ -39,15 +54,15 @@ class TAEVideoNodeBase:
             raise ValueError("Bad latent type")
         tae_model_path = folder_paths.get_full_path("vae_approx", vmi.tae_model)
         if tae_model_path is None:
-            if latent_type == "wan21":
-                model_src = "taew2_1.pth from https://github.com/madebyollin/taehv"
-            elif latent_type == "wan22":
-                model_src = "taew2_2.pth from https://github.com/madebyollin/taehv"
-            elif latent_type == "hunyuanvideo":
-                model_src = "taehv.pth from https://github.com/madebyollin/taehv"
+            dl_info = cls._download_map.get(latent_type)
+            if dl_info is None:
+                err_string = (
+                    f"Unexpected latent type {latent_type}, no information available"
+                )
             else:
-                model_src = "taem1.pth from https://github.com/madebyollin/taem1"
-            err_string = f"Missing TAE video model. Download {model_src} and place it in the models/vae_approx directory"
+                filename, reponame = dl_info
+                model_src = f"{filename} from https://github.com/madebyollin/{reponame}"
+                err_string = f"Missing TAE video model. Download {model_src} and place it in the models/vae_approx directory"
             raise RuntimeError(err_string)
         device = model_management.vae_device()
         dtype = model_management.vae_dtype(device=device)
@@ -66,7 +81,7 @@ class TAEVideoNodeBase:
 class TAEVideoDecode(TAEVideoNodeBase):
     RETURN_TYPES = ("IMAGE",)
     CATEGORY = "latent"
-    DESCRIPTION = "Fast decoding of Wan, Hunyuan and Mochi video latents with the video equivalent of TAESD."
+    DESCRIPTION = "Fast decoding of Wan, Hunyuan, Mochi and LTX video latents with the video equivalent of TAESD."
 
     @classmethod
     def INPUT_TYPES(cls) -> dict:
@@ -100,7 +115,7 @@ class TAEVideoDecode(TAEVideoNodeBase):
 class TAEVideoEncode(TAEVideoNodeBase):
     RETURN_TYPES = ("LATENT",)
     CATEGORY = "latent"
-    DESCRIPTION = "Fast encoding of Wan, Hunyuan and Mochi video latents with the video equivalent of TAESD."
+    DESCRIPTION = "Fast encoding of Wan, Hunyuan, Mochi and LTX video latents with the video equivalent of TAESD."
 
     @classmethod
     def INPUT_TYPES(cls) -> dict:
