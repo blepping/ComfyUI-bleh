@@ -323,6 +323,10 @@ You will need to download the models and put them in `models/vae_approx`. Don't 
 
 ***
 
+## Blend Modes
+
+There is some incomplete documentation [here](blend_modes.md).
+
 ## Scaling Types
 
 * bicubic: Generally the safe option.

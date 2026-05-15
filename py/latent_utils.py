@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 from functools import partial
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import kornia.filters as kf
 import numpy as np
@@ -21,6 +21,18 @@ if TYPE_CHECKING:
 
 OVERRIDE_NO_SCALE = "COMFYUI_BLEH_OVERRIDE_NO_SCALE" in os.environ
 USE_ORIG_NORMALIZE = "COMFYUI_BLEH_ORIG_NORMALIZE" in os.environ
+
+
+def pass_kwargs(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    if args:
+        if not all(isinstance(a, dict) for a in args):
+            raise ValueError("Can only pass a single dict positionally")
+        a0 = args[0]
+        for a in args[1:]:
+            a0.update(a)
+        a0.update(kwargs)
+        kwargs = a0
+    return {k.removesuffix("_"): v for k, v in kwargs.items()}
 
 
 def normalize_orig(latent, target_min=None, target_max=None, **_unused_kwargs: dict):
@@ -77,6 +89,160 @@ def normalize_to_scale(
     )
 
 
+def soft_clamp(
+    t: torch.Tensor,
+    min_val: torch.Tensor | float = 0.0,
+    max_val: torch.Tensor | float = 1.0,
+    *,
+    # We define stiffness as a multiplier (beta) for the softplus function.
+    # Higher stiffness = sharper transition.
+    stiffness: float = 1.0,
+    safe: bool = True,
+) -> torch.Tensor:
+    if stiffness < 1e-04:
+        return t.clamp(min_val, max_val)
+    if not isinstance(min_val, torch.Tensor):
+        min_val = t.new_tensor(min_val)
+    if not isinstance(max_val, torch.Tensor):
+        max_val = t.new_tensor(max_val)
+
+    # Calculate how much we are exceeding the Max
+    # softplus(beta * x) / beta
+    upper_overshoot = nnf.softplus((t - max_val).mul_(stiffness)).div_(-stiffness)
+
+    # Calculate how much we are falling short of the Min
+    lower_undershoot = nnf.softplus((min_val - t).mul_(stiffness)).div_(stiffness)
+
+    # Apply corrections:
+    # Original - (Amount over max) + (Amount under min)
+    t = upper_overshoot.add_(t).add_(lower_undershoot)
+    return t.clamp_(min_val, max_val) if safe else t
+
+
+def force_gaussian_distribution(
+    t: torch.Tensor,
+    *,
+    start_dim: int = 1,
+    end_dim: int = -1,
+    # Invert the argsorts, option for crazy people. Not recommended.
+    invert1: bool = False,
+    invert2: bool = False,
+    eps: float = 1e-08,
+) -> torch.Tensor:
+    if start_dim < 0:
+        start_dim = t.ndim + start_dim
+    orig_shape = t.shape
+    t_flat = t.flatten(start_dim=start_dim, end_dim=end_dim).movedim(start_dim, -1)
+
+    # Get the rank of each element (0 to N-1)
+    # Double argsort safely returns the rank of the original elements
+    ranks = (
+        t_flat.argsort(dim=-1, descending=invert1)
+        .argsort(dim=-1, descending=invert2)
+        .to(t)
+    )
+
+    # Map ranks to a uniform distribution (0.0 to 1.0 exclusive)
+    # then to a Gaussian curve.
+    factor = max(eps, t_flat.shape[-1] / 2)
+    gaussian = ranks.div_(factor).add_(0.5 / factor - 1).erfinv_().mul_(2**0.5)
+
+    return gaussian.movedim(-1, start_dim).reshape(orig_shape)
+
+
+# Forces source to the distribution of reference.
+def match_distribution(
+    source: torch.Tensor,
+    *,
+    reference: torch.Tensor,
+    start_dim: int = 1,
+    end_dim: int = -1,
+    # Invert the sorts, option for crazy people. Not recommended.
+    invert1: bool = False,
+    invert2: bool = False,
+    invert3: bool = False,
+) -> torch.Tensor:
+    if source is reference:
+        return source.clone()
+    if start_dim < 0:
+        start_dim = source.ndim + start_dim
+    orig_shape = source.shape
+    s_flat = source.flatten(
+        start_dim=start_dim,
+        end_dim=end_dim,
+    ).movedim(start_dim, -1)
+    r_flat = reference.flatten(
+        start_dim=start_dim,
+        end_dim=end_dim,
+    ).movedim(start_dim, -1)
+
+    r_sorted = r_flat.sort(dim=-1, descending=invert1).values
+    s_ranks = s_flat.argsort(
+        dim=-1,
+        descending=invert2,
+    ).argsort(dim=-1, descending=invert3)
+
+    # 4. Give the source elements the values from the reference.
+    return (
+        r_sorted.gather(dim=-1, index=s_ranks)
+        .movedim(-1, start_dim)
+        .reshape(orig_shape)
+    )
+
+
+# Scales the source tensor to match the median and variance of the reference.
+def robust_scale_match(
+    source: torch.Tensor,
+    *,
+    reference: torch.Tensor | None = None,
+    # Default MAD if the reference is not passed. Targets the Gaussian distribution.
+    mad: float = 0.6745,
+    start_dim: int = 1,
+    end_dim: int = -1,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    if start_dim < 0:
+        start_dim = source.ndim + start_dim
+    orig_shape = source.shape
+    source = source.flatten(start_dim=start_dim, end_dim=end_dim).movedim(start_dim, -1)
+    # Find the median and spread (MAD) of the source
+    src_sub_median = source - source.median(dim=-1, keepdim=True).values
+    s_mad = (
+        src_sub_median.abs()
+        .median(
+            dim=-1,
+            keepdim=True,
+        )
+        .values.clamp_min_(eps)
+    )
+
+    # If no reference, target a Standard Gaussian scale.
+    # (A standard Gaussian has a median of 0 and a MAD of ~0.6745)
+    if reference is None:
+        mad = min(-eps, mad) if mad < 0 else max(eps, mad)
+        return (
+            src_sub_median.mul_(s_mad.reciprocal_().mul_(mad))
+            .movedim(-1, start_dim)
+            .reshape(orig_shape)
+        )
+    reference = reference.flatten(
+        start_dim=start_dim,
+        end_dim=end_dim,
+    ).movedim(start_dim, -1)
+
+    # Find the reference median and spread
+    r_median = reference.median(dim=-1, keepdim=True).values
+    r_mad = (reference - r_median).abs_().median(dim=-1, keepdim=True).values
+
+    # Stretch the source to match the reference
+    return (
+        src_sub_median.mul_(r_mad.div_(s_mad))
+        .add_(r_median)
+        .movedim(-1, start_dim)
+        .reshape(orig_shape)
+    )
+
+
 def hslerp(a, b, t):
     if a.shape != b.shape:
         raise ValueError("Input tensors a and b must have the same shape.")
@@ -94,7 +260,9 @@ def hslerp(a, b, t):
     interpolation_tensor[0, 0, 0, 0] = 1.0 if t < 0.5 else -1.0
 
     result = (1 - t) * a + t * b
-    result += (torch.norm(b - a, dim=1, keepdim=True) / 6) * interpolation_tensor
+    result += (
+        torch.linalg.vector_norm(b - a, dim=1, keepdim=True) / 6
+    ) * interpolation_tensor
 
     return result
 
@@ -111,7 +279,7 @@ def hslerp_alt(a, b, t):
     )
     interp[0, 0] = 1.0
     result = (1 - t) * a + t * b
-    norm = (torch.norm(b - a, dim=1, keepdim=True) / 6) * interp
+    norm = (torch.linalg.vector_norm(b - a, dim=1, keepdim=True) / 6) * interp
     norm[t.broadcast_to(norm.shape) < 0.5] *= -1
     return result.add_(norm)
 
@@ -127,7 +295,7 @@ def hslerp_alt2(a, b, t, *, sign_order=(1.0, -1.0), sign_threshold=0.5):
         ((1 - t) * a)
         .add_(t * b)
         .add_(
-            torch.norm(b - a, dim=1, keepdim=True).div_(6)
+            torch.linalg.vector_norm(b - a, dim=1, keepdim=True).div_(6)
             * torch.where(t_expanded.abs() < sign_threshold, *sign_order),
         )
     )
@@ -138,8 +306,8 @@ def slerp_orig(b1, b2, r):
     c = b1.shape[-1]
 
     # norms
-    b1_norms = torch.norm(b1, dim=-1, keepdim=True)
-    b2_norms = torch.norm(b2, dim=-1, keepdim=True)
+    b1_norms = torch.linalg.vector_norm(b1, dim=-1, keepdim=True)
+    b2_norms = torch.linalg.vector_norm(b2, dim=-1, keepdim=True)
 
     # normalize
     b1_normalized = b1 / b1_norms
@@ -169,7 +337,7 @@ def slerp_orig(b1, b2, r):
 
 
 # From https://gist.github.com/Birch-san/230ac46f99ec411ed5907b0a3d728efa
-def altslerp(  # noqa: PLR0914
+def altslerp(
     v0: FloatTensor,
     v1: FloatTensor,
     t: float | FloatTensor,
@@ -234,6 +402,7 @@ def stochasistic_blend(
     fuzz=0.1,
     clamp_t: bool | tuple = True,
     blend=torch.lerp,
+    **kwargs: Any,
 ):
     if not isinstance(t, torch.Tensor):
         t = torch.tensor((t,), dtype=a.dtype, device=a.device)
@@ -254,7 +423,7 @@ def stochasistic_blend(
     elif clamp_t:
         tmin, tmax = t_orig.aminmax()
         tadj = tadj.clamp_(min(0, tmin), max(1.0, tmax))
-    return blend(a, b, tadj)
+    return blend(a, b, tadj, **pass_kwargs(kwargs))
 
 
 def gaussian_smoothing(
@@ -289,9 +458,9 @@ def gaussian_smoothing(
     elif ndim != 4:
         raise ValueError("Can't handle tensor shape")
     if len(kernel_size) == 1:
-        kernel_size = kernel_size * 2  # noqa: PLR6104
+        kernel_size = kernel_size * 2
     if len(sigma) == 1:
-        sigma = sigma * 2  # noqa: PLR6104
+        sigma = sigma * 2
     result = kf.gaussian_blur2d(t, kernel_size, sigma)
     if ndim == 5:
         return result.reshape(*ts)
@@ -313,7 +482,7 @@ class ProbBlend:
         *,
         cpu=False,
         collapse_dims=(),
-        **kwargs: dict,
+        **kwargs: Any,
     ):
         t_device = torch.device("cpu") if cpu else a.device
         if not isinstance(t, torch.Tensor):
@@ -322,7 +491,7 @@ class ProbBlend:
             t = t.detach().clone().to(t_device)
         tmin, tmax = t.aminmax()
         tmin, tmax = min(tmin, 0.0), max(tmax, 1.0)
-        t = t - tmin  # noqa: PLR6104
+        t = t - tmin
         tdiv = tmax - tmin
         if tdiv != 0:
             t /= tdiv
@@ -336,7 +505,7 @@ class ProbBlend:
         else:
             prob_shape = a.shape
         t = torch.bernoulli(t.clamp_(0, 1).broadcast_to(prob_shape)).to(a)
-        return self.output(a, b, t, **kwargs)
+        return self.output(a, b, t, **pass_kwargs(kwargs))
 
 
 class ProbBlendSmoothed(ProbBlend):
@@ -369,6 +538,7 @@ def gradient_blend_(
     dim=-1,
     scaling_constant=0.9,
     blend_function=torch.lerp,
+    **kwargs: Any,
 ) -> torch.Tensor:
     dim = max(0, min(a.ndim - 1, a.ndim + dim if dim < 0 else dim))
     if not isinstance(t, torch.Tensor):
@@ -385,7 +555,7 @@ def gradient_blend_(
     if scaling_constant != 1:
         ratios *= scaling_constant
     ratios = ratios.view(tuple(1 if i != dim else -1 for i in range(a.ndim)))
-    return blend_function(a, b, ratios)
+    return blend_function(a, b, ratios, **pass_kwargs(kwargs))
 
 
 def gradient_blend(
@@ -396,6 +566,7 @@ def gradient_blend(
     flatten_start_dim=1,
     scaling_constant=0.9,
     blend_function=torch.lerp,
+    **kwargs: Any,
 ) -> torch.Tensor:
     shape = a.shape
     # print("\nBLEND:", t)
@@ -413,7 +584,7 @@ def gradient_blend(
     )
     if scaling_constant != 1:
         ratios *= scaling_constant
-    result = blend_function(a, b, ratios)
+    result = blend_function(a, b, ratios, **pass_kwargs(kwargs))
     if result.shape != shape:
         return result.reshape(*shape).contiguous()
     return result
@@ -457,7 +628,7 @@ def slice_blend(
     return result.reshape(orig_shape)
 
 
-def slice_blend_smooth(  # noqa: PLR0914
+def slice_blend_smooth(
     a: torch.Tensor,
     b: torch.Tensor,
     t: float | torch.Tensor,
@@ -471,6 +642,7 @@ def slice_blend_smooth(  # noqa: PLR0914
     b_blend_max: float = 1.0,
     invert: bool = False,  # Doesn't work propertly at the moment.
     blend_function=torch.lerp,
+    **kwargs: Any,
 ) -> torch.Tensor:
     if isinstance(t, torch.Tensor):
         t = t.mean().clamp(0, 1)
@@ -531,7 +703,7 @@ def slice_blend_smooth(  # noqa: PLR0914
     blend_mask = blend_mask.view(
         tuple(dim_els if d == dim else 1 for d in range(a.ndim)),
     )
-    return blend_function(a, b, blend_mask).reshape(orig_shape)
+    return blend_function(a, b, blend_mask, **pass_kwargs(kwargs)).reshape(orig_shape)
 
 
 def lop_lerp(
@@ -547,7 +719,7 @@ def lop_lerp(
     return (a_ratio - t.clamp(max=a_ratio)).mul(a).add_(b * (t * b_ratio))
 
 
-# # Thanks, ChatGPT though you did get the ratio reversed.
+# Thanks, ChatGPT though you did get the ratio reversed.
 def cosine_similarity_blend_chatgpt_orig(
     b: torch.Tensor,
     a: torch.Tensor,
@@ -663,8 +835,8 @@ def cosine_similarity_blend_deepseek(  # noqa: PLR0914
         ratio = a.new_tensor(ratio)
 
     # Compute magnitudes of a and b along the specified dimension
-    mag_a = torch.norm(a, p=2, dim=dim, keepdim=True).add_(eps)
-    mag_b = torch.norm(b, p=2, dim=dim, keepdim=True).add_(eps)
+    mag_a = torch.linalg.vector_norm(a, p=2, dim=dim, keepdim=True).add_(eps)
+    mag_b = torch.linalg.vector_norm(b, p=2, dim=dim, keepdim=True).add_(eps)
 
     # Avoid division by zero during normalization
     a_norm = a / mag_a
@@ -723,9 +895,9 @@ def cosine_similarity_blend(
     a: torch.Tensor,
     b: torch.Tensor,
     t: float | torch.Tensor,
-    *args: list,
+    *args: Any,
     backend=DEFAULT_COSINE_SIMILARITY_BLEND_BACKEND,
-    **kwargs: dict,
+    **kwargs: Any,
 ) -> torch.Tensor:
     fun = COSINE_SIMILARITY_BLEND_BACKENDS.get(backend)
     if fun is None:
@@ -969,7 +1141,7 @@ def symmetric_ortho_blend(
     *,
     symmetric_strength: float = 1.0,
     symmetric_deduce_mode: bool = False,
-    **kwargs: dict,
+    **kwargs: Any,
 ) -> torch.Tensor:
     blended = ortho_blend(a, b, t, **kwargs)
     if symmetric_strength == 0.0:
@@ -1014,8 +1186,9 @@ def contrastive_ortho_cfg_base_a(
     final_rescale_strength: float = 1.0,
     final_rescale_kwargs: dict | None = None,
     diff_only: bool = False,
-    **kwargs: dict,
+    **kwargs: Any,
 ) -> torch.Tensor:
+    kwargs = pass_kwargs(kwargs)
     t_is_tensor = isinstance(t, torch.Tensor)
     if not t_is_tensor:
         if t == 0.0:
@@ -1112,7 +1285,7 @@ class WaveletBlend:
         *,
         device: str | torch.device | None = None,
         use_float64: bool = False,
-        **kwargs: dict,
+        **kwargs: Any,
     ):
         self.device = device
         self.wavelet_kwargs = kwargs
@@ -1234,7 +1407,7 @@ def wavelet_blend(
     *,
     blend_mode_yl: str | Callable = torch.lerp,
     blend_mode_yh: str | Callable | None = None,
-    **kwargs: dict[str, Any],
+    **kwargs: Any,
 ) -> torch.Tensor:
     if isinstance(blend_mode_yl, str):
         blend_mode_yl = BLENDING_MODES[blend_mode_yl]
@@ -1333,7 +1506,7 @@ class TieredBlendWrapper:
         a: torch.Tensor,
         b: torch.Tensor | float,
         t: torch.Tensor | float,
-        **kwargs: dict,
+        **kwargs: Any,
     ) -> torch.Tensor:
         if self.tiers < 1:
             return self.blend_function(a, b, t, **kwargs)
@@ -1421,7 +1594,7 @@ def tiered_blend(
     *,
     tiers_blend_mode: str | Callable = "lerp",
     tiers_blend_kwargs: dict | None = None,
-    **kwargs: dict,
+    **kwargs: Any,
 ) -> torch.Tensor:
     if isinstance(tiers_blend_mode, str):
         tiers_blend_mode = BLENDING_MODES[tiers_blend_mode]
@@ -1438,7 +1611,7 @@ def tiered_blend(
     wrapped_blend_function = TieredBlendWrapper(tiers_blend_mode, **tw_kwargs)
     if tiers_blend_kwargs is not None:
         kwargs = kwargs | tiers_blend_kwargs
-    return wrapped_blend_function(a, b, t, **kwargs)
+    return wrapped_blend_function(a, b, t, **pass_kwargs(kwargs))
 
 
 # Shortest path circular interpolation (with the default params)
@@ -1586,11 +1759,11 @@ def geodesic_square_matrix(
         a = a[..., :minsz, :minsz]
         b = b[..., :minsz, :minsz]
     inv_op = torch.linalg.pinv if use_pinv else torch.linalg.inv
-    mlg = matrix_log(a @ inv_op(b))
+    mlg = matrix_log(b @ inv_op(a))
     velocity = torch.linalg.matrix_exp(
         mlg * (t.to(dtype=mlg.dtype) if isinstance(t, torch.Tensor) else t),
     )
-    result = (velocity @ b.to(velocity.dtype)).to(dtype=a.dtype)
+    result = (velocity @ a.to(velocity.dtype)).to(dtype=a.dtype)
     if x == y:
         return result
     a_orig = a_orig.clone()
@@ -1628,6 +1801,7 @@ def fft_blend(
     fft_dims = tuple(fft_dims)
     if a.ndim < 3:
         raise ValueError("fft blend can only handle tensors with 3+ dimensions.")
+    kwargs = pass_kwargs(kwargs)
     p_blend = (
         BLENDING_MODES[phase_blend_mode]
         if isinstance(phase_blend_mode, str)
@@ -1658,7 +1832,8 @@ def fft_blend(
         b_mag = b_mag.add_(magnitude_eps).pow_(b_magnitude_power)
     if not isinstance(t, torch.Tensor):
         t = a.new_tensor(t)
-    if t.ndim > 1:
+    elif t.ndim > 1:
+        # FIXME: This probably doesn't work.
         t = t.broadcast_to(a_f.shape)
         if avg_t_frequency_dims:
             t = t.mean(dim=fft_dims, keepdim=True)
@@ -1689,144 +1864,458 @@ def fft_blend(
     )
 
 
-def align_decomp(
-    left: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    right: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    *,
-    align_mode: str = "joint",
-    invert: bool = False,
-    eps: float = 1e-06,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    align_mode = align_mode.strip().lower()
-    if align_mode not in {"u", "v", "vh", "joint"}:
-        raise ValueError("Align mode must be one of u, v[h], or joint")
-    align_mode = align_mode[0]
+class DecompBlend:
+    @staticmethod
+    def decomp(
+        t: torch.Tensor,
+        *,
+        mode: str = "svd",
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        tqdm.write(f"DECOMP: shape1={t.shape}")
+        if t.ndim > 3:
+            raise ValueError(
+                "Can only handle batched or unbatched matrices (2 or 3 dimensions)",
+            )
+        tqdm.write(f"DECOMP: shape={t.shape}")
+        if mode == "svd":
+            return torch.linalg.svd(t, full_matrices=False)
+        if mode == "svd_lowrank":
+            q = kwargs.pop("q", None)
+            u, s, v = torch.svd_lowrank(
+                t,
+                q=q if q is not None else t.shape[-1],
+                **kwargs,
+            )
+            return u, s, v.mT
+        if mode == "qr":
+            u, r_mat = torch.linalg.qr(t)
+            s = r_mat.diagonal(dim1=-2, dim2=-1)
+            vh = (1.0 / s).masked_fill_(s == 0.0, 1.0 / 1e-08).unsqueeze(-1) * r_mat
+            return u, s, vh
+        raise ValueError("Bad decomp mode")
 
-    ul, sl, vl = left
-    ur, sr, vr = right
+    @staticmethod
+    def align(
+        left: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        right: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        *,
+        align_mode: str = "joint",
+        invert: bool = False,
+        eps: float = 1e-06,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        align_mode = align_mode.strip().lower()
+        if align_mode not in {"u", "v", "vh", "joint"}:
+            raise ValueError("Align mode must be one of u, v[h], or joint")
+        align_mode = align_mode[0]
 
-    def get_sim(t_right: torch.Tensor, t_left: torch.Tensor) -> torch.Tensor:
-        norm_right, norm_left = (
-            torch.linalg.vector_norm(t, dim=-2, keepdim=True).clamp_min_(eps)
-            for t in (t_right, t_left)
+        ul, sl, vl = left
+        ur, sr, vr = right
+
+        def get_sim(t_right: torch.Tensor, t_left: torch.Tensor) -> torch.Tensor:
+            norm_right, norm_left = (
+                torch.linalg.vector_norm(t, dim=-2, keepdim=True).clamp_min_(eps)
+                for t in (t_right, t_left)
+            )
+            return (t_right / norm_right).mT @ (t_left / norm_left)
+
+        sim_u = get_sim(ur, ul) if align_mode in "uj" else None
+        sim_vh = get_sim(vr.mT, vl.mT) if align_mode in "vj" else None
+        sim = (
+            sim_u * sim_vh
+            if align_mode == "j"
+            else (sim_u if sim_u is not None else sim_vh)
         )
-        return (t_right / norm_right).mT @ (t_left / norm_left)
 
-    sim_u = get_sim(ur, ul) if align_mode in "uj" else None
-    sim_vh = get_sim(vr.mT, vl.mT) if align_mode in "vj" else None
-    sim = (
-        sim_u * sim_vh
-        if align_mode == "j"
-        else (sim_u if sim_u is not None else sim_vh)
-    )
-
-    match_idx = (sim.abs().argmin if invert else sim.abs().argmax)(dim=-1)
-    signs = (
-        (sim if align_mode != "j" else sim_u)
-        .gather(
-            dim=-1,
-            index=match_idx.unsqueeze(-1),
+        match_idx = (sim.abs().argmin if invert else sim.abs().argmax)(dim=-1)
+        signs = (
+            (sim if align_mode != "j" else sim_u)
+            .gather(
+                dim=-1,
+                index=match_idx.unsqueeze(-1),
+            )
+            .sign_()
         )
-        .sign_()
-    )
-    return (
-        ul.gather(
-            dim=-1,
-            index=match_idx.unsqueeze(-2).expand(*ul.shape[:-1], sr.shape[-1]),
+        return (
+            ul.gather(
+                dim=-1,
+                index=match_idx.unsqueeze(-2).expand(*ul.shape[:-1], sr.shape[-1]),
+            )
+            * signs.mT,
+            sl.gather(dim=-1, index=match_idx),
+            vl.gather(
+                dim=-2,
+                index=match_idx.unsqueeze(-1).expand(
+                    *vl.shape[:-2],
+                    sr.shape[-1],
+                    vl.shape[-1],
+                ),
+            )
+            * signs,
         )
-        * signs.mT,
-        sl.gather(dim=-1, index=match_idx),
-        vl.gather(
-            dim=-2,
-            index=match_idx.unsqueeze(-1).expand(
-                *vl.shape[:-2],
-                sr.shape[-1],
-                vl.shape[-1],
-            ),
+
+    @staticmethod
+    def get_size_with_offset(
+        *,
+        rank: int,
+        size: float,
+        offset: float = -1,
+    ) -> tuple[int, int]:
+        size = int(size) if abs(size) >= 1.0 else math.ceil(size * rank)
+        if size < 0:
+            size = rank + size
+        elif size == 0:
+            size = rank
+        offset = int(offset) if abs(offset) >= 1.0 else math.ceil(offset * rank)
+        if offset < 0:
+            offset = rank + offset
+        size = max(0, min(rank, size))
+        offset = min(rank - size, max(0, offset))
+        return (size, offset)
+
+    @classmethod
+    def rank_slice_blend(
+        cls,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        # Negative values count from the end. Values > -1.0, < 1.0 are interpreted
+        # as percentage of ranks. Values outside of that range are truncated and treated
+        # as absolute rank indexes. Offsets are specified the same way.
+        t: float | torch.Tensor,
+        *,
+        feature_dim: int = 1,
+        # You will always get the exact size you specify and the offset will be adjusted
+        # if there isn't enough space.
+        rank_offset: float = -1.0,
+        decomp_mode: str = "svd",
+        align_mode: str = "joint",
+        align_invert: bool = False,
+        blend_components: str = "usv",
+        n_iter: int = 6,
+        q: int | None = None,
+    ) -> torch.Tensor:
+        if a.ndim < 2 or b.ndim < 2:
+            raise ValueError("Can only only handle 2+ dimensional tensors")
+        t = t.mean().detach().cpu().item() if isinstance(t, torch.Tensor) else float(t)
+
+        tqdm.write(f"ORIG SHAPE: {a.shape}")
+        a = a.movedim(feature_dim, -1)
+        flat_start_dim = 1 if a.ndim > 2 else 0
+        adj_shape = a.shape
+        a = a.flatten(start_dim=flat_start_dim, end_dim=-2)
+        b = b.movedim(feature_dim, -1).flatten(start_dim=flat_start_dim, end_dim=-2)
+
+        dl = cls.decomp(a, mode=decomp_mode, niter=n_iter, q=q)
+        dr = cls.decomp(b, mode=decomp_mode, niter=n_iter, q=q)
+
+        size, offset = cls.get_size_with_offset(
+            rank=dl[1].shape[-1],
+            size=t,
+            offset=rank_offset,
         )
-        * signs,
-    )
+        rs = slice(offset, offset + size)
 
+        if (align_mode := align_mode.strip().lower()) in {"joint", "u", "v", "vh"}:
+            dl = cls.align(
+                dl,
+                dr,
+                align_mode=align_mode,
+                invert=align_invert,
+            )
+        ((ua, sa, vha), (ub, sb, vhb)) = dl, dr
+        blend_components = blend_components.strip().lower()
+        if "u" in blend_components:
+            ua[..., rs] = ub[..., rs]
+        if "s" in blend_components:
+            sa[..., rs] = sb[..., rs]
+        if "v" in blend_components:
+            vha[..., rs, :] = vhb[..., rs, :]
+        result = ua @ sa.diag_embed() @ vha
+        return result.reshape(adj_shape).movedim(-1, feature_dim).contiguous()
 
-def do_decomp(
-    t: torch.Tensor,
-    *,
-    mode: str = "svd",
-    **kwargs: Any,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if t.ndim > 2:
-        t = t.flatten(start_dim=2).mT
-    if mode == "svd":
-        return torch.linalg.svd(t, full_matrices=False)
-    if mode == "svd_lowrank":
-        q = kwargs.pop("q", None)
-        u, s, v = torch.svd_lowrank(t, q=q if q is not None else t.shape[-1], **kwargs)
-        return u, s, v.mT
-    if mode == "qr":
-        u, r_mat = torch.linalg.qr(t)
-        s = r_mat.diagonal(dim1=-2, dim2=-1)
-        vh = (1.0 / s).masked_fill_(s == 0.0, 1.0 / 1e-08).unsqueeze(-1) * r_mat
-        return u, s, vh
-    raise ValueError("Bad decomp mode")
-
-
-def decomp_rank_blend(
-    # 3+ dimensional tensors will get flattened starting from dimension 2 and
-    # then transposed for the decomposition. I.E. (B, C, H, W) -> (B, H*W, C)
-    a: torch.Tensor,
-    b: torch.Tensor,
-    t: float | torch.Tensor,
-    *,
-    t_s: float | None = None,
-    t_v: float | None = None,
-    flip: bool = False,
-    decomp_mode: str = "svd",
-    align_mode: str = "joint",
-    align_invert: bool = False,
-    blend_components: str = "usv",
-    n_iter: int = 6,
-    q: int | None = None,
-) -> torch.Tensor:
-    if a.ndim < 2 or b.ndim < 2:
-        raise ValueError("Can only only handle 2+ dimensional tensors")
-    if isinstance(t, torch.Tensor):
-        t = t.mean().clamp_(0, 1).detach().cpu().item()
-    else:
-        t = min(1.0, max(0.0, float(t)))
-    t, t_s, t_v = (
-        min(1.0, max(0.0, float(val)))
-        for val in (t, t_s if t_s is not None else t, t_v if t_v is not None else t)
-    )
-    if t == 0.0 and t_s == 0.0 and t_v == 0:
-        return a.clone()
-
-    dl = do_decomp(a, mode=decomp_mode, niter=n_iter, q=q)
-    dr = do_decomp(b, mode=decomp_mode, niter=n_iter, q=q)
-
-    if (align_mode := align_mode.strip().lower()) in {"joint", "u", "v", "vh"}:
-        dl = align_decomp(
-            dl,
-            dr,
-            align_mode=align_mode,
-            invert=align_invert,
+    @staticmethod
+    def normalizing_in(
+        t: torch.Tensor,
+        *,
+        centering_strength: float,
+        centering_restore_strength: float,
+        variance_normalizing: bool,
+        aug_scale: float,
+        dim: int | Sequence[int],
+        orig_features: int,
+        in_place: bool = True,
+        trim_features: bool = True,
+        eps: float = 1e-08,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        if not in_place:
+            t = t.clone()
+        if not isinstance(dim, int):
+            dim = tuple(dim)
+        mean = (
+            t.mean(dim=dim, keepdim=True)
+            if centering_strength != 0.0 or centering_restore_strength != 0.0
+            else None
         )
-    ((ua, sa, vha), (ub, sb, vhb)) = dl, dr
-    blend_components = blend_components.strip().lower()
-    rank = sa.shape[-1]
-    size_u, size_s, size_v = (
-        min(rank, max(0, math.ceil(rank * val))) for val in (t, t_s, t_v)
-    )
-    rs_u, rs_s, rs_v = (
-        slice(None, sz) if not flip else slice(-sz, None)
-        for sz in (size_u, size_s, size_v)
-    )
-    if "u" in blend_components:
-        ua[..., rs_u] = ub[..., rs_u]
-    if "s" in blend_components:
-        sa[..., rs_s] = sb[..., rs_s]
-    if "v" in blend_components:
-        vha[..., rs_v, :] = vhb[..., rs_v, :]
-    return (ua @ sa.diag_embed() @ vha).mT.reshape(a.shape)
+        if centering_strength != 0 and mean is not None:
+            t -= mean * centering_strength if centering_strength != 1 else mean
+        if mean is not None and trim_features:
+            mean = mean[..., :orig_features]
+        if variance_normalizing:
+            std = t.std(dim=dim, keepdim=True).clamp_min_(eps)
+            t /= std
+            if trim_features:
+                std = std[..., :orig_features]
+        else:
+            std = None
+        if aug_scale != 0 and t.shape[-1] > orig_features:
+            t[..., orig_features:] *= aug_scale
+        return t, mean, std
+
+    @staticmethod
+    def normalizing_out(
+        t: torch.Tensor,
+        *,
+        mean: torch.Tensor | None = None,
+        std: torch.Tensor | None = None,
+        centering_restore_strength: float,
+        in_place: bool = True,
+    ) -> torch.Tensor:
+        if mean is None and std is None:
+            return t
+        if not in_place:
+            t = t.clone()
+        t_slices = tuple(slice(None, sz) for sz in t.shape)
+        mean, std = (None if temp is None else temp[t_slices] for temp in (mean, std))
+        if std is not None:
+            t *= std
+        if centering_restore_strength != 0 and mean is not None:
+            t += (
+                mean.mul_(centering_restore_strength)
+                if centering_restore_strength != 1
+                else mean
+            )
+        return t
+
+    @classmethod
+    def rank_blend(
+        cls,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        t: float | torch.Tensor,
+        *,
+        # Controls whether changes get applied to a or b.
+        base_a: bool = True,
+        blend_mode: Callable | str = torch.lerp,
+        # If None, uses addition (inject) in diff mode or LERP in blend mode.
+        result_blend_mode: Callable | str | None = None,
+        # One of diff, slice, blend
+        blend_strategy: str = "diff",
+        # Negative values count from the end. Values > -1.0, < 1.0 are interpreted
+        # as percentage of ranks. Values outside of that range are truncated and treated
+        # as absolute rank indexes. Offsets are specified the same way.
+        # Since the ranks parameter is a size, 0 means all ranks, -2 to means total_ranks - 2, etc.
+        ranks: float = 0.5,
+        # You will always get the exact size you specify and the offset will be adjusted
+        # if there isn't enough space.
+        rank_offset: float = -1.0,
+        rank_start_scale: float = 1.0,
+        rank_end_scale: float = 1.0,
+        rank_ramp_power: float = 0.0,
+        use_log_rank_scales: bool = False,
+        # rmula, rmulb, amulb, rroll, rmulroll, rmulrollc
+        feature_augmentations: Sequence[str] = ("rmula", "rmulb", "amulb"),
+        feature_augmentation_scale: float = 0.0,
+        feature_dim: int = 1,
+        # Flattening occurs after the feature dim is moved to the end.
+        flatten_start_dim: int = 1,
+        flatten_end_dim: int = -2,
+        decomp_mode: str = "svd",
+        centering_strength: float = 0.0,
+        centering_restore_strength: float = 0.0,
+        result_scale: float = 1.0,
+        variance_normalizing: bool = False,
+        # Alignment only applies to the slice blend strategy.
+        align_mode: str = "joint",
+        align_invert: bool = False,
+        align_base: bool = True,
+        decomp_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        if blend_strategy not in {"diff", "blend", "slice"}:
+            raise ValueError("Bad blend_strategy")
+        if a.ndim < 2 or b.ndim < 2:
+            raise ValueError("Can only only handle 2+ dimensional tensors")
+        if isinstance(blend_mode, str):
+            blend_mode = BLENDING_MODES[blend_mode]
+        if isinstance(result_blend_mode, str):
+            result_blend_mode = BLENDING_MODES[result_blend_mode]
+        elif result_blend_mode is None and blend_strategy == "blend":
+            result_blend_mode = torch.lerp
+
+        kwargs = pass_kwargs(kwargs)
+        feature_augmentations = tuple(feature_augmentations)
+
+        use_aug = feature_augmentations and feature_augmentation_scale != 0
+        base = a if base_a else b
+        blend_result: torch.Tensor = blend_mode(a, b, t, **kwargs)
+        if blend_strategy == "diff":
+            blend_result -= base
+        blend_result = blend_result.movedim(feature_dim, -1)
+        adj_shape = blend_result.shape
+        orig_features = adj_shape[-1]
+        blend_result = blend_result.flatten(
+            start_dim=flatten_start_dim,
+            end_dim=flatten_end_dim,
+        )
+        if use_aug:
+            aug_list = [blend_result]
+            flat_a = a.movedim(feature_dim, -1).flatten(
+                start_dim=flatten_start_dim,
+                end_dim=flatten_end_dim,
+            )
+            flat_b = b.movedim(feature_dim, -1).flatten(
+                start_dim=flatten_start_dim,
+                end_dim=flatten_end_dim,
+            )
+            aug = None
+            for augtype in feature_augmentations:
+                if augtype == "rmula":
+                    aug = blend_result * flat_a
+                elif augtype == "rmulb":
+                    aug = blend_result * flat_b
+                elif augtype == "amulb":
+                    aug = flat_a * flat_b
+                elif augtype == "rroll":
+                    aug = blend_result.roll(shifts=1, dims=-2)
+                elif augtype == "rmulroll":
+                    aug = blend_result.roll(shifts=1, dims=-2).mul_(blend_result)
+                elif augtype == "rmulrollc":
+                    aug = blend_result.roll(shifts=1, dims=-1).mul_(blend_result)
+                else:
+                    errstr = f"Unknown augmentation type: {augtype}"
+                    raise ValueError(errstr)
+                aug_list.append(aug)
+            if len(aug_list) > 1:
+                blend_result = torch.cat(aug_list, dim=-1)
+            del aug, aug_list, flat_a, flat_b
+        norm_in = partial(
+            cls.normalizing_in,
+            centering_strength=centering_strength,
+            centering_restore_strength=centering_restore_strength,
+            variance_normalizing=variance_normalizing,
+            aug_scale=feature_augmentation_scale,
+            dim=flatten_start_dim,
+            orig_features=orig_features,
+        )
+        if blend_strategy == "slice":
+            flat_base = blend_result.clone()
+            flat_base[..., :orig_features] = base.movedim(feature_dim, -1).flatten(
+                start_dim=flatten_start_dim,
+                end_dim=flatten_end_dim,
+            )
+            flat_base, base_mean, base_std = norm_in(flat_base)
+        else:
+            flat_base = base_mean = base_std = None
+        blend_result, mean, std = norm_in(blend_result)
+        dr = cls.decomp(blend_result, mode=decomp_mode, **(decomp_kwargs or {}))
+        if blend_strategy == "slice" and flat_base is not None:
+            db = cls.decomp(flat_base, mode=decomp_mode, **(decomp_kwargs or {}))
+            if (align_mode := align_mode.strip().lower()) in {"joint", "u", "v", "vh"}:
+                temp = cls.align(
+                    db if align_base else dr,
+                    dr if align_base else db,
+                    align_mode=align_mode,
+                    invert=align_invert,
+                )
+                db, dr = (temp, dr) if align_base else (db, temp)
+                del temp
+
+        u, s, vh = dr
+        size, offset = cls.get_size_with_offset(
+            rank=s.shape[-1],
+            size=ranks,
+            offset=rank_offset,
+        )
+        if rank_start_scale != rank_end_scale:
+            if rank_offset < 0:
+                rank_start_scale, rank_end_scale = rank_end_scale, rank_start_scale
+            rank_scales = torch.linspace(
+                rank_start_scale,
+                rank_end_scale,
+                steps=size,
+                dtype=a.dtype,
+                device=a.device,
+            ).unsqueeze(0)
+            if rank_ramp_power != 0:
+                rank_scales = torch.where(
+                    rank_scales == 0,
+                    0,
+                    rank_scales.abs().pow_(rank_ramp_power).copysign_(rank_scales),
+                )
+        else:
+            rank_scales = rank_start_scale
+        rs = slice(offset, offset + size)
+        tqdm.write(
+            f"RANK BLEND: slice={rs}, scales={rank_scales}, shape={blend_result.shape}, adj={adj_shape}",
+        )
+        u, s, vh = u[..., rs], s[..., rs], vh[..., rs, :]
+        if not isinstance(rank_scales, float) or rank_scales != 1.0:
+            if use_log_rank_scales:
+                s = s.abs().log1p_().copysign_(s)
+            s *= rank_scales
+            if use_log_rank_scales:
+                s = s.abs().expm1_().copysign_(s)
+        result = (u @ s.diag_embed() @ vh)[..., :orig_features]
+        if result_scale != 1.0 and result_blend_mode is None:
+            if std is None:
+                result *= result_scale
+            else:
+                std *= result_scale
+        result = cls.normalizing_out(
+            result,
+            mean=mean,
+            std=std,
+            centering_restore_strength=centering_restore_strength,
+        )
+        if blend_strategy == "slice" and db is not None:
+            bu, bs, bvh = db
+            size_before = rs.start
+            size_after = bs.shape[-1] - rs.stop
+            base_result = (
+                (
+                    bu[..., :size_before]
+                    @ bs[..., :size_before].diag_embed()
+                    @ bvh[..., :size_before, :]
+                )
+                if size_before > 0
+                else None
+            )
+            if size_after > 0:
+                temp = (
+                    bu[..., rs.stop :]
+                    @ bs[..., rs.stop :].diag_embed()
+                    @ bvh[..., rs.stop :, :]
+                )
+                base_result = (
+                    base_result.add_(temp) if base_result is not None else temp
+                )
+            if base_result is not None:
+                base_result = cls.normalizing_out(
+                    base_result[..., :orig_features],
+                    mean=base_mean,
+                    std=base_std,
+                    centering_restore_strength=centering_restore_strength,
+                )
+                result += base_result
+
+        result = result.reshape(adj_shape).movedim(-1, feature_dim).contiguous()
+        if blend_strategy == "slice":
+            return result
+        if result_blend_mode is not None:
+            return result_blend_mode(base, result, result_scale, **kwargs)
+        if blend_strategy == "diff":
+            return result.add_(base)
+        raise RuntimeError("Unhandled blend_strategy")
 
 
 def chain_blend(
@@ -1844,9 +2333,358 @@ def chain_blend(
         if isinstance(chain_blend_mode, str)
         else chain_blend_mode
     )
+    kwargs = pass_kwargs(kwargs)
     for _ in range(chain_iterations):
         b = fun(a, b, *args, **kwargs)
     return b
+
+
+def pct_limit_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *args: Any,
+    base_a: bool = True,
+    diff_limit: float = 0.25,
+    eps: float = 1e-07,
+    blend_mode: str | Callable = torch.lerp,
+    dim: int | Sequence[int] | None = None,
+    # Only applies in elementwise mode (dim=None)
+    prevent_sign_flip: bool = False,
+    # Negative values disable soft clamp for that specific constraint.
+    # Higher stiffness -> approach the limit more closely before values warp.
+    pct_clamp_stiffness: float = 10.0,
+    sign_clamp_stiffness: float = 10.0,
+    **kwargs: Any,
+) -> torch.Tensor:
+    if a.ndim < 2:
+        raise ValueError("Blend function requires 2+ dimensions")
+    if diff_limit < 0:
+        raise ValueError("diff_limit must be positive")
+
+    blend_function = (
+        BLENDING_MODES[blend_mode] if isinstance(blend_mode, str) else blend_mode
+    )
+
+    br = blend_function(a, b, *args, **pass_kwargs(kwargs))
+    base = a if base_a else b
+
+    if diff_limit == 0:
+        return base.clone()
+
+    if dim is not None:
+        diff = br.sub_(base)
+        diff_norm = torch.linalg.vector_norm(diff, dim=dim, keepdim=True)
+        max_norm = (
+            torch.linalg.vector_norm(base, dim=dim, keepdim=True)
+            .mul_(diff_limit)
+            .clamp_min_(eps)
+        )
+
+        if pct_clamp_stiffness >= 0:
+            # Soft clamp the magnitude of the difference
+            soft_diff_norm = soft_clamp(
+                diff_norm,
+                min_val=0.0,
+                max_val=max_norm,
+                stiffness=pct_clamp_stiffness,
+            )
+            scale = soft_diff_norm.div_(diff_norm.clamp_min_(eps))
+        else:
+            # Hard clamp the scale
+            scale = max_norm.div_(diff_norm.clamp_min_(eps)).clamp_max_(1.0)
+
+        return diff.mul_(scale).add_(base)
+
+    # Elementwise handling.
+    if prevent_sign_flip:
+        # Create bounds using infinity so we ONLY restrict the zero-crossing
+        mask = base >= 0
+        sign_lower = torch.where(mask, 0.0, -torch.inf)
+        sign_upper = torch.where(mask, torch.inf, 0.0)
+
+        if sign_clamp_stiffness >= 0:
+            br = soft_clamp(br, sign_lower, sign_upper, stiffness=sign_clamp_stiffness)
+        else:
+            br = br.clamp_(min=sign_lower, max=sign_upper)
+
+    max_diff = base.abs().mul_(diff_limit).clamp_min_(eps)
+    lower_bound = base - max_diff
+    upper_bound = base + max_diff
+
+    if pct_clamp_stiffness < 0:
+        return br.clamp_(min=lower_bound, max=upper_bound)
+    return soft_clamp(br, lower_bound, upper_bound, stiffness=pct_clamp_stiffness)
+
+
+def moment_aligned_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *args: Any,
+    blend_mode: str | Callable = torch.lerp,
+    base_a: bool = True,
+    mean_scale: float = 1.0,
+    std_scale: float = 1.0,
+    dim: int | Sequence[int] | None = None,
+    eps: float = 1e-07,
+    **kwargs: Any,
+) -> torch.Tensor:
+    blend_function = (
+        BLENDING_MODES[blend_mode] if isinstance(blend_mode, str) else blend_mode
+    )
+    kwargs = pass_kwargs(kwargs)
+
+    if mean_scale == 0.0 and std_scale == 0.0:
+        return blend_function(a, b, *args, **kwargs)
+
+    if dim is None:
+        dim = tuple(range(1, a.ndim))
+
+    target, base = (b, a) if base_a else (a, b)
+    mean_target = target.mean(dim=dim, keepdim=True)
+
+    # Centering here is always necessary. We will add the mean back if mean_scale is 0.
+    aligned = target - mean_target
+    if std_scale != 0.0:
+        std_target = target.std(dim=dim, keepdim=True).clamp_min_(eps)
+        std_base = base.std(dim=dim, keepdim=True).clamp_min_(eps)
+        std_goal = std_base if std_scale == 1 else std_target.lerp(std_base, std_scale)
+        aligned *= std_goal.div_(std_target)
+        del std_target, std_base, std_goal
+    if mean_scale != 0.0:
+        mean_base = base.mean(dim=dim, keepdim=True)
+        mean_goal = (
+            mean_base if mean_scale == 1 else mean_target.lerp_(mean_base, mean_scale)
+        )
+        del mean_base
+    else:
+        mean_goal = mean_target
+    aligned += mean_goal
+    del mean_goal, mean_target, base, target
+
+    return blend_function(
+        a if base_a else aligned,
+        aligned if base_a else b,
+        *args,
+        **kwargs,
+    )
+
+
+def distro_aligned_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *args: Any,
+    blend_mode: str | Callable = torch.lerp,
+    reference_blend_mode: str | Callable = torch.lerp,
+    # When using a reference and unset, will use the original ratio.
+    reference_blend: float | torch.Tensor | None = None,
+    reference: torch.Tensor | None = None,
+    # One of da, db, dr(eference), sa, sb, sr, dg(aussian), sg
+    # 's' vs 'd' determines whether distro or robust scale matching is used.
+    align_a: str | None = None,
+    align_b: str | None = None,
+    align_result: str | None = None,
+    start_dim: int = 1,
+    end_dim: int = -1,
+    scale_match_mad: float = 0.6745,
+    **kwargs: Any,
+) -> torch.Tensor:
+    if len(args) == 0:
+        raise ValueError("Missing ratio positional parameter")
+    kwargs = pass_kwargs(kwargs)
+    blend_function = (
+        BLENDING_MODES[blend_mode] if isinstance(blend_mode, str) else blend_mode
+    )
+    if align_a is None and align_b is None and align_result is None:
+        return blend_function(a, b, *args, **kwargs)
+    need_ref = reference is None and any(
+        val in {"dr", "sr"} for val in (align_a, align_b, align_result)
+    )
+    if need_ref:
+        ref_blend_function = (
+            BLENDING_MODES[reference_blend_mode]
+            if isinstance(reference_blend_mode, str)
+            else reference_blend_mode
+        )
+        ref_args = (
+            reference_blend if reference_blend is not None else args[0],
+            *args[1:],
+        )
+        reference = ref_blend_function(a, b, *ref_args, **kwargs)
+
+    align_targets = {
+        "da": a,
+        "db": b,
+        "dr": reference,
+        "sa": a,
+        "sb": b,
+        "sr": reference,
+    }
+    if any(
+        val not in {None, "dg", "sg"} and align_targets.get(val) is None
+        for val in (align_a, align_b, align_result)
+    ):
+        raise ValueError("Invalid align target")
+
+    def do_align(t: torch.Tensor, amode: str | None) -> torch.Tensor:
+        if amode is None:
+            return t
+        if amode == "dg":
+            return force_gaussian_distribution(t, start_dim=start_dim, end_dim=end_dim)
+        if amode == "sg":
+            return robust_scale_match(
+                t,
+                start_dim=start_dim,
+                end_dim=end_dim,
+                mad=scale_match_mad,
+            )
+        if amode.startswith("d"):
+            return match_distribution(
+                t,
+                reference=align_targets[amode],
+                start_dim=start_dim,
+                end_dim=end_dim,
+            )
+        return robust_scale_match(
+            t,
+            reference=align_targets[amode],
+            start_dim=start_dim,
+            end_dim=end_dim,
+        )
+
+    a, b = (do_align(item, amode) for item, amode in ((a, align_a), (b, align_b)))
+
+    return do_align(blend_function(a, b, *args, **kwargs), align_result)
+
+
+# Standard LERP, but the weights are forced to preserve a variance of 1.
+def pythagorean_lerp(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    eps: float = 1e-08,
+) -> torch.Tensor:
+    w_a = 1.0 - t
+    w_b = t
+
+    # Calculate how much the variance would shrink.
+    if isinstance(w_a, torch.Tensor):
+        variance_shrink = (w_a**2).add_(w_b**2).sqrt_().clamp_min_(eps)
+    else:
+        variance_shrink = max(eps, (w_a**2 + w_b**2) ** 0.5)
+
+    # Then scale the weights to compensate.
+    return a.mul(w_a / variance_shrink).add_(b * (w_b / variance_shrink))
+
+
+def rms_interpolation(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    # To only use magnitude, enable this and set power to 1.
+    abs_inputs: bool = False,
+    # One of:
+    #   blend, reference (reference must be supplied), a, b, leave,
+    sign_mode: str = "blend",
+    reference: torch.Tensor | None = None,
+    blend_mode: str | Callable = torch.lerp,
+    sign_blend_mode: str | Callable | None = None,
+    power: float | torch.Tensor = 2.0,
+    inv_power: float | torch.Tensor | None = None,
+    **kwargs: Any,
+) -> torch.Tensor:
+    kwargs = pass_kwargs(kwargs)
+    blend_function = (
+        BLENDING_MODES[blend_mode] if isinstance(blend_mode, str) else blend_mode
+    )
+    a_orig, b_orig = a, b
+    if abs_inputs:
+        a, b = a.abs(), b.abs()
+    if power != 1.0:
+        if inv_power is None:
+            inv_power = 1 / power
+        a, b = a**power, b**power
+    blend_result = blend_function(a, b, t, **kwargs)
+    if power != 1.0:
+        if sign_mode == "leave":
+            return blend_result.abs().pow_(inv_power).copysign_(blend_result)
+        blend_result = blend_result.abs_().pow_(inv_power)
+    elif sign_mode == "leave":
+        return blend_result
+    if sign_mode == "blend":
+        sign_blend_function = (
+            (
+                BLENDING_MODES[sign_blend_mode]
+                if isinstance(sign_blend_mode, str)
+                else sign_blend_mode
+            )
+            if sign_blend_mode is not None
+            else blend_function
+        )
+        reference = sign_blend_function(a_orig, b_orig, t, **kwargs)
+        return blend_result.copysign_(reference)
+    if sign_mode == "reference":
+        if reference is None:
+            raise ValueError("sign mode reference requires a reference to be supplied")
+        return blend_result.copysign_(reference.to(blend_result))
+    if sign_mode == "a":
+        return blend_result.copysign_(a_orig)
+    if sign_mode == "b":
+        return blend_result.copysign_(b_orig)
+    errstr = f"Unhandled sign mode: {sign_mode}"
+    raise ValueError(errstr)
+
+
+def orbit_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    t: float | torch.Tensor,
+    *,
+    # One of leave, clamp, bsuba, rsuba, rsubb
+    excess_mode: str = "leave",
+    invert_excess: bool = False,
+) -> torch.Tensor:
+    t_orig = t
+    if excess_mode == "clamp":
+        t = t.clamp(-1, 1) if isinstance(t, torch.Tensor) else max(-1.0, min(1.0, t))
+    angle = t * (math.pi / 2.0)
+    if isinstance(angle, torch.Tensor):
+        orbit = a.mul(angle.cos()).add_(b.mul(angle.sin()))
+    else:
+        orbit = (a * math.cos(angle)).add_(b * math.sin(angle))
+
+    if excess_mode not in {"leave", "clamp"}:
+        have_excess = (
+            torch.any(t_orig.abs() > 1).detach().cpu().item()
+            if isinstance(t_orig, torch.Tensor)
+            else abs(t_orig) > 1
+        )
+    else:
+        have_excess = False
+
+    if not have_excess:
+        return orbit
+
+    if excess_mode == "bsuba":
+        tangent_vector = b - a
+    elif excess_mode == "rsuba":
+        tangent_vector = orbit - a
+    elif excess_mode == "rsubb":
+        tangent_vector = orbit - b
+    else:
+        errstr = f"Unknown excess mode: {excess_mode}"
+        raise ValueError(errstr)
+    if invert_excess:
+        tangent_vector = tangent_vector.neg_()
+
+    # 2. How far out of bounds are we? (0 if t <= 1)
+    if isinstance(t_orig, torch.Tensor):
+        excess = (t_orig.abs() - 1.0).clamp_min_(0.0).copysign_(t_orig)
+    else:
+        excess = math.copysign(max(0.0, abs(t_orig) - 1.0), t_orig)
+
+    return orbit.add_(tangent_vector.mul_(excess))
 
 
 class BlendMode:
@@ -2197,22 +3035,19 @@ BLENDING_MODES = {
     "b_only": BlendMode(lambda _a, b, t: b * t, allow_scale=False),
     # Interpolates between tensors a and b using normalized linear interpolation.
     # This definitely isn't biSLERP.
-    "bislerp_wrong": BlendMode(
-        lambda a, b, t: ((1 - t) * a).add_(t * b),
-        normalize,
-    ),
-    # "nbislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b, normalize),
+    "bislerp_wrong": BlendMode(torch.lerp, normalize),
+    # "^"bislerp": BlendMode(lambda a, b, t: (1 - t) * a + t * b, normalize),
     "slerp": BlendMode(altslerp),
     # Transfer the color from `b` to `a` by t` factor
-    "colorize": BlendMode(lambda a, b, t: (b - a).mul_(t).add_(a)),
+    "colorize": BlendMode(torch.lerp),
     # Interpolates between tensors a and b using cosine interpolation.
     "cosinterp": BlendMode(
-        lambda a, b, t: (
-            (a + b).sub_((a - b).mul_(torch.cos(t * torch.tensor(math.pi))))
-        ).div_(2),
+        lambda a, b, t: ((a + b).sub_((a - b).mul_((t * torch.pi).cos()))).div_(2),
     ),
     # Interpolates between tensors a and b using cubic interpolation.
-    "cuberp": BlendMode(lambda a, b, t: (b - a).mul_(3 * t**2 - 2 * t**3).add_(a)),
+    "cuberp": BlendMode(
+        lambda a, b, t: (b - a).mul_((3 * t**2).sub_(2 * t**3)).add_(a),
+    ),
     # Interpolates between tensors a and b using normalized linear interpolation,
     # with a twist when t is greater than or equal to 0.5.
     "hslerp": BlendMode(hslerp),
@@ -2261,27 +3096,26 @@ BLENDING_MODES = {
     "inject_copysign_b": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(b)),
     "inject_avoidsign_a": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(a.neg())),
     "inject_avoidsign_b": BlendMode(lambda a, b, t: (b * t).add_(a).copysign_(b.neg())),
-    "cfg": BlendMode(lambda a, b, t: (a - b).mul_(t).add_(b)),
+    "cfg": BlendMode(torch.lerp),
     "cfg_base_a": BlendMode(lambda a, b, t: (a - b).mul_(t).add_(a)),
     # Interpolates between tensors a and b using linear interpolation.
-    # "lerp": BlendMode(lambda a, b, t: ((1.0 - t) * a).add_(t * b)),
     "lerp": BlendMode(torch.lerp),
-    "lerp050x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.5)),
-    "lerp075x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(0.75)),
-    "lerp110x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.1)),
-    "lerp125x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.25)),
-    "lerp150x": BlendMode(lambda a, b, t: (((1 - t) * a).add_(t * b)).mul_(1.5)),
+    "lerp050x": BlendMode(lambda a, b, t: a.lerp(b, t).mul_(0.5)),
+    "lerp075x": BlendMode(lambda a, b, t: a.lerp(b, t).mul_(0.75)),
+    "lerp110x": BlendMode(lambda a, b, t: a.lerp(b, t).mul_(1.1)),
+    "lerp125x": BlendMode(lambda a, b, t: a.lerp(b, t).mul_(1.25)),
+    "lerp150x": BlendMode(lambda a, b, t: a.lerp(b, t).mul_(1.5)),
     "lerp_copysign_a": BlendMode(
-        lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(a),
+        lambda a, b, t: a.lerp(b, t).copysign_(a),
     ),
     "lerp_copysign_b": BlendMode(
-        lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(b),
+        lambda a, b, t: a.lerp(b, t).copysign_(b),
     ),
     "lerp_avoidsign_a": BlendMode(
-        lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(a.neg()),
+        lambda a, b, t: a.lerp(b, t).copysign_(a.neg()),
     ),
     "lerp_avoidsign_b": BlendMode(
-        lambda a, b, t: ((1.0 - t) * a).add_(t * b).copysign_(b.neg()),
+        lambda a, b, t: a.lerp(b, t).copysign_(b.neg()),
     ),
     "weighted_average": BlendMode(
         lambda a, b, t: (b * t).add_(a) / (1.0 + abs(t)),
@@ -2289,7 +3123,9 @@ BLENDING_MODES = {
     # Simulates a brightening effect by adding tensor b to tensor a, scaled by t.
     "lineardodge": BlendMode(lambda a, b, t: (b * t).add_(a)),
     "copysign": BlendMode(lambda a, b, _t: torch.copysign(a, b)),
-    "probcopysign": BlendMode(lambda a, b, t: torch.copysign(a, prob_blend(a, b, t))),
+    "probcopysign": BlendMode(
+        lambda a, b, t: prob_blend(a, b, t).copysign_(a),
+    ),
     "slice_flat_d1": BlendMode(slice_blend, dim=1, flatten=True),
     "slice_flat_d2": BlendMode(slice_blend, dim=2, flatten=True),
     "slice_d1": BlendMode(slice_blend, dim=1, flatten=False),
@@ -2527,8 +3363,34 @@ BLENDING_MODES = {
     "fft_blend": BlendMode(fft_blend),
     "fft_phase_blend": BlendMode(partial(fft_blend, magnitude_blend_multiplier=0.0)),
     "fft_magnitude_blend": BlendMode(partial(fft_blend, phase_blend_multiplier=0.0)),
-    "decomp_rank_blend": BlendMode(decomp_rank_blend),
-    "chain": BlendMode(chain_blend),
+    "decomp_rank_blend": BlendMode(DecompBlend.rank_slice_blend),
+    "decomp_diff": BlendMode(DecompBlend.rank_blend),
+    "chain": BlendMode(chain_blend, visible=False),
+    "pct_limited_025": BlendMode(partial(pct_limit_blend, diff_limit=0.25)),
+    "moment_aligned": BlendMode(moment_aligned_blend),
+    "distro_aligned": BlendMode(partial(distro_aligned_blend, align_b="da")),
+    "distro_aligned_result": BlendMode(
+        partial(distro_aligned_blend, align_result="da"),
+    ),
+    "gaussian_aligned_result": BlendMode(
+        partial(distro_aligned_blend, align_result="dg"),
+    ),
+    "gaussian_aligned": BlendMode(
+        partial(
+            distro_aligned_blend,
+            align_a="dg",
+            align_b="dg",
+            align_result="dg",
+        ),
+    ),
+    "magnitude_interpolation_lerpsign": BlendMode(
+        partial(rms_interpolation, sign_mode="blend", abs_inputs=True, power=1.0),
+    ),
+    "rms_interpolation_lerpsign": BlendMode(
+        partial(rms_interpolation, sign_mode="blend"),
+    ),
+    "pythagorean_lerp": BlendMode(pythagorean_lerp),
+    "orbit": BlendMode(orbit_blend),
 }
 
 BLENDING_MODES |= {
@@ -2795,7 +3657,7 @@ def scale_samples(
         ).tolist()
         mode, mode_h = (
             m if mode not in {"random", "randomaa"} else RAND_UPSCALE_METHODS[ridx]
-            for ridx, m in zip(ridxs, (mode, mode_h))
+            for ridx, m in zip(ridxs, (mode, mode_h), strict=True)
         )
         mode_h = mode
     if mode in {"bicubic", "nearest-exact", "bilinear", "area"}:
@@ -2839,7 +3701,7 @@ def scale_samples(
 
 
 # Modified from ComfyUI
-def biderp(samples, width, height, mode="bislerp", mode_h=None):  # noqa: PLR0914
+def biderp(samples, width, height, mode="bislerp", mode_h=None):
     if mode_h is None:
         mode_h = mode
 
