@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import NamedTuple
 
 
 class Settings:
@@ -80,6 +79,9 @@ SETTINGS = Settings()
 
 
 def load_settings():
-    if not SETTINGS.try_update_from_yaml("blehconfig.yaml"):
-        SETTINGS.try_update_from_json("blehconfig.json")
+    if not (
+        SETTINGS.try_update_from_yaml("blehconfig.yaml")
+        or SETTINGS.try_update_from_json("blehconfig.json")
+    ):
+        SETTINGS.update({"previews": {}})
     return SETTINGS
