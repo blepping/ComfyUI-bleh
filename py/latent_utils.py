@@ -2562,19 +2562,54 @@ def pythagorean_lerp(
     b: torch.Tensor,
     t: float | torch.Tensor,
     *,
+    growth_power: float = 0.0,
+    # 0 disables variance clamping.
+    max_variance: float = 0.0,
+    # Zero or negative values disable soft clamping.
+    stiffness: float = 10.0,
+    # Generally should be left at 1. Only applies when clamping variance.
+    magnitude_min: float = 1.0,
+    # Using non-default power will result in something completely different from
+    # Pythagorean LERP. These generally should be left on the defaults.
+    power: float = 2.0,
+    inv_power: float | None = None,
     eps: float = 1e-08,
 ) -> torch.Tensor:
-    w_a = 1.0 - t
-    w_b = t
+    if inv_power is None:
+        inv_power = 1.0 / power
+    if not isinstance(t, torch.Tensor):
+        t = a.new_tensor(t)
+    t_inv = 1.0 - t
 
     # Calculate how much the variance would shrink.
-    if isinstance(w_a, torch.Tensor):
-        variance_shrink = (w_a**2).add_(w_b**2).sqrt_().clamp_min_(eps)
+    raw_magnitude = magnitude = (
+        t_inv.abs()
+        .pow_(power)
+        .add_(t.abs().pow_(power))
+        .pow_(inv_power)
+        .clamp_min_(eps)
+    )
+    if growth_power != 1.0:
+        magnitude = raw_magnitude**growth_power
+    if max_variance != 0:
+        magnitude = soft_clamp(
+            magnitude,
+            min_val=magnitude_min,
+            max_val=max_variance,
+            stiffness=stiffness,
+        )
+    if magnitude is raw_magnitude:
+        w_a, w_b = t_inv, t
     else:
-        variance_shrink = max(eps, (w_a**2 + w_b**2) ** 0.5)
-
-    # Then scale the weights to compensate.
-    return a.mul(w_a / variance_shrink).add_(b * (w_b / variance_shrink))
+        factor = (
+            raw_magnitude
+            if magnitude is raw_magnitude
+            else magnitude.div_(
+                raw_magnitude.abs().clamp_min_(eps).copysign(raw_magnitude),
+            )
+        )
+        w_a, w_b = t_inv * factor, t * factor
+    return (a * w_a).add_(b * w_b)
 
 
 def rms_interpolation(

@@ -2,7 +2,11 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
-## 2026TBD
+## 20260518
+
+* Added `BlehConstrastiveOrthoCFG` node.
+
+## 20260515
 
 * Support LTX 2.0, LTX 2.3 and LTX 2.3 wide TAE models.
 * Added a `BlehFixGuiderPreviewing` node. Using this is necessary for LTX previews, it can also be used to set the LTX 2.3 wide previewer mode or override the default FPS when generating video previews.

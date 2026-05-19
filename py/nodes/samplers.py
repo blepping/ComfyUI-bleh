@@ -7,13 +7,16 @@ import random
 from copy import deepcopy
 from functools import partial, update_wrapper
 from os import environ
-from typing import Any, Callable, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 from comfy.samplers import KSAMPLER, KSampler, k_diffusion_sampling
 from tqdm import tqdm
 
 from .misc import Wildcard
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 BLEH_PRESET_LIMIT = 16
 BLEH_PRESET_COUNT = 1

@@ -9,13 +9,13 @@ import random
 from decimal import Decimal
 from functools import partial
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple, Sequence
 
 import torch
 from comfy import model_management
 from comfy.model_management import throw_exception_if_processing_interrupted
 
-from .. import latent_utils
+from .. import latent_utils as lutils
 from ..better_previews.previewer import PREVIEWER_STATE, ensure_previewer
 
 if TYPE_CHECKING:
@@ -113,7 +113,7 @@ class BlehDisableNoise:
         )
 
 
-class Wildcard(str):  # noqa: FURB189
+class Wildcard(str):
     __slots__ = ()
 
     def __ne__(self, _unused):
@@ -412,7 +412,7 @@ class BlehLatentAsImage:
         )[..., :4]
         if values_mode == "clamp":
             return (image.clamp(0.0, 1.0),)
-        image = latent_utils.normalize_to_scale(
+        image = lutils.normalize_to_scale(
             image,
             0.0,
             1.0,
@@ -871,7 +871,7 @@ class BlehBlendConditioning:
                 "conditioning_1": ("CONDITIONING",),
                 "conditioning_2": ("CONDITIONING",),
                 "blend_mode": (
-                    tuple(latent_utils.BLENDING_MODES.keys()),
+                    tuple(lutils.BLENDING_MODES.keys()),
                     {"default": "lerp"},
                 ),
                 "strength": (
@@ -946,7 +946,7 @@ class BlehBlendConditioning:
     ) -> tuple:
         blend_tensor_list = (s.strip() for s in blend_tensors.split(","))
         blend_tensor_set = {s for s in blend_tensor_list if s}
-        blend_function = latent_utils.BLENDING_MODES[blend_mode]
+        blend_function = lutils.BLENDING_MODES[blend_mode]
         mdbm = metadata_base_mode
 
         # Initialize our stateful blender
@@ -1044,3 +1044,207 @@ class BlehBlendConditioning:
             blend_full_items=True,
         )
         return (result,)
+
+
+class ContrastiveOrthoCFG(NamedTuple):
+    start_sigma: float = 99999.0
+    end_sigma: float = 0.0
+    positive_scale: float = 0.2
+    negative_scale: float = 1.0
+    start_dim: int = 1
+    end_dim: int = 1
+    use_noise: bool = False
+    base_denoised: bool = False
+
+    def extract_common(self, cond: torch.Tensor, uncond: torch.Tensor) -> torch.Tensor:
+        return lutils.contrastive_ortho_cfg_base_a(
+            cond,
+            uncond,
+            1.0,
+            a_ortho_scale=-1.0,
+            b_ortho_scale=1.0,
+            start_dim=self.start_dim,
+            end_dim=self.end_dim,
+        )
+
+    def extract_parts(
+        self,
+        cond: torch.Tensor,
+        uncond: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        common = self.extract_common(cond, uncond)
+        unique_cond = cond - common
+        unique_uncond = uncond - common
+        if self.negative_scale != 1:
+            unique_uncond *= self.negative_scale
+        if self.positive_scale != 1:
+            unique_cond *= self.positive_scale
+        return common, unique_cond, unique_uncond
+
+    def check_sigma(self, sigma: torch.Tensor) -> bool:
+        sigma_f = sigma.mean().detach().cpu().item()
+        return self.end_sigma <= sigma_f <= self.start_sigma
+
+    def pad_sigma(self, sigma: torch.Tensor, ndim: int) -> torch.Tensor:
+        return (
+            sigma
+            if sigma.ndim == 0
+            else sigma.reshape(sigma.shape[0], *((1,) * (ndim - 1)))
+        )
+
+    def precfg_patch(self, args: dict[str, Any]) -> Sequence[torch.Tensor]:
+        x = args["input"]
+        sigma = args["sigma"]
+        conds_out = args["conds_out"]
+        if len(conds_out) < 2 or conds_out[1] is None or not self.check_sigma(sigma):
+            return conds_out
+        sigma = self.pad_sigma(sigma, x.ndim)
+        cond, uncond = conds_out[:2]
+        if self.use_noise:
+            cond = (x - cond).div_(sigma)
+            uncond = (x - uncond).div_(sigma)
+        common, cond_new, uncond_new = self.extract_parts(cond, uncond)
+        cond_new += common
+        uncond_new += common
+        if self.use_noise:
+            cond_new = cond_new.mul_(-sigma).add_(x)
+            uncond_new = uncond_new.mul_(-sigma).add_(x)
+        return conds_out.__class__((cond_new, uncond_new, *conds_out[2:]))
+
+    def postcfg_patch(self, args: dict[str, Any]) -> torch.Tensor:
+        x = args["input"]
+        cond = args["denoised"] if self.base_denoised else args["cond_denoised"]
+        uncond = args.get("uncond_denoised")
+        sigma = args["sigma"]
+        denoised = args["denoised"]
+        if not self.check_sigma(sigma) or uncond is cond or uncond is None:
+            return denoised
+        sigma = self.pad_sigma(sigma, x.ndim)
+        if self.use_noise:
+            cond, uncond, denoised = (
+                (x - t).div_(sigma) for t in (cond, uncond, denoised)
+            )
+        common, cond_unique, uncond_unique = self.extract_parts(cond, uncond)
+        denoised = cond_unique.sub_(uncond_unique).add_(
+            common if self.base_denoised else denoised,
+        )
+        return denoised.mul_(-sigma).add_(x) if self.use_noise else denoised
+
+
+class BlehContrastiveOrthoCFG:
+    DESCRIPTION = "Contrastive orthogonal CFG. CFG variant that allows you to control the scale of negative and positive features individually. For the most predictable effects, use positive scales and pre_cfg mode with use_noise disabled. This is just a slower version of CFG if you use the default parameters and positive/negative scales of 1.0."
+    FUNCTION = "go"
+    OUTPUT_NODE = False
+    CATEGORY = "advanced/guidance"
+
+    RETURN_TYPES = ("MODEL",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        dc = ContrastiveOrthoCFG()
+        return {
+            "required": {
+                "model": ("MODEL",),
+            },
+            "optional": {
+                "start_sigma": (
+                    "FLOAT",
+                    {
+                        "default": dc.start_sigma,
+                        "max": 99999.0,
+                        "min": 0.0,
+                    },
+                ),
+                "end_sigma": (
+                    "FLOAT",
+                    {
+                        "default": dc.end_sigma,
+                        "max": 99999.0,
+                        "min": 0.0,
+                    },
+                ),
+                "positive_scale": (
+                    "FLOAT",
+                    {
+                        "default": dc.positive_scale,
+                        "min": -9999.0,
+                        "max": 9999.0,
+                        "tooltip": "Scale for features unique to the positive prompt (cond). In pre-CFG mode, this gets multiplied by the CFG scale. For example, at CFG 5, the default of 0.2 would result in roughly the same strength as CFG 1.",
+                    },
+                ),
+                "negative_scale": (
+                    "FLOAT",
+                    {
+                        "default": dc.negative_scale,
+                        "min": -9999.0,
+                        "max": 9999.0,
+                        "tooltip": "Scale for features unique to the negative prompt (uncond). This gets subtracted. In pre-CFG mode the scale is effectively multiplied by CFG.",
+                    },
+                ),
+                "patch_mode": (
+                    ("pre_cfg", "post_cfg", "post_cfg_base_denoised"),
+                    {
+                        "default": "pre_cfg",
+                        "tooltip": "pre_cfg: This mode applies the positive change to cond and the negative change to uncond and lets the CFG function take care of subtracting the negative part and adding the positive part. Since CFG 1 is normally just cond, at CFG one you will get the positive change applied as expected but the negative side will have no effect. Or in other words, result is basically common + unique_positive * CFG - unique_negative * (CFG - 1).\n\npost_cfg: The unique negative features are subtracted at exactly the scale you specify and the unique positive features are added in the same way. However, these are relative to the original cond/uncond generations but are applied to the result of CFG.\n\npost_cfg_base_denoised: This is like post_cfg mode except the positive side is what's unique to denoised (the result of CFG) and both parts are added to a common base. The results can be weird if you have other CFG type effects (I.E. CFG++) running afterward because what's unique to denoised will also include the negative side of uncond. Experimental mode, generally not recommended.",
+                    },
+                ),
+                "start_dim": (
+                    "INT",
+                    {
+                        "default": dc.start_dim,
+                        "min": -999,
+                        "max": 999,
+                        "tooltip": "Start dimension (zero-based) for determining orthogonal features. Image models typically use dimensions BATCH, CHANNELS, HEIGHT, WIDTH. Video models insert a FRAMES dimension after CHANNELS. The default is to normalize over channels.",
+                    },
+                ),
+                "end_dim": (
+                    "INT",
+                    {
+                        "default": dc.end_dim,
+                        "min": -999,
+                        "max": 999,
+                        "tooltip": "End dimension (zero-based) for determining orthogonal features. Image models typically use dimensions BATCH, CHANNELS, HEIGHT, WIDTH. Video models insert a FRAMES dimension after CHANNELS. The default is to normalize over channels.",
+                    },
+                ),
+                "use_noise": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Apply CFG to the noise prediction instead of the clean image. CFG normally uses the clean image. Experimental option and generally it's harder to separate out what's orthogonal from noise compared to a clean latent.",
+                    },
+                ),
+                "force_uncond_generation": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Disables the normal optimization that skip generating uncond (negative prompt) when CFG is 1.",
+                    },
+                ),
+            },
+        }
+
+    @classmethod
+    def go(
+        cls,
+        *,
+        model,
+        patch_mode: str = "pre_cfg",
+        force_uncond_generation: bool = False,
+        **kwargs: Any,
+    ) -> tuple:
+        patch_object = ContrastiveOrthoCFG(
+            base_denoised=patch_mode.endswith("_base_denoised"),
+            **kwargs,
+        )
+        model = model.clone()
+        if patch_mode == "pre_cfg":
+            model.set_model_sampler_pre_cfg_function(
+                patch_object.precfg_patch,
+                disable_cfg1_optimization=force_uncond_generation,
+            )
+        else:
+            model.set_model_sampler_post_cfg_function(
+                patch_object.postcfg_patch,
+                disable_cfg1_optimization=force_uncond_generation,
+            )
+        return (model,)
