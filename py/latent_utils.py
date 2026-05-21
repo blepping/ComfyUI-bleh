@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
@@ -17,7 +18,7 @@ from tqdm import tqdm
 from . import wavelet_functions as wavef
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
 OVERRIDE_NO_SCALE = "COMFYUI_BLEH_OVERRIDE_NO_SCALE" in os.environ
 USE_ORIG_NORMALIZE = "COMFYUI_BLEH_ORIG_NORMALIZE" in os.environ
@@ -199,6 +200,8 @@ def robust_scale_match(
     mad: float = 0.6745,
     start_dim: int = 1,
     end_dim: int = -1,
+    # Sets the mean rather than the median.
+    set_mean: bool = True,
     eps: float = 1e-8,
 ) -> torch.Tensor:
     if start_dim < 0:
@@ -216,12 +219,16 @@ def robust_scale_match(
         .values.clamp_min_(eps)
     )
 
+    source_adj = (
+        source - source.mean(dim=-1, keepdim=True) if set_mean else src_sub_median
+    )
+
     # If no reference, target a Standard Gaussian scale.
     # (A standard Gaussian has a median of 0 and a MAD of ~0.6745)
     if reference is None:
         mad = min(-eps, mad) if mad < 0 else max(eps, mad)
         return (
-            src_sub_median.mul_(s_mad.reciprocal_().mul_(mad))
+            source_adj.mul_(s_mad.reciprocal_().mul_(mad))
             .movedim(-1, start_dim)
             .reshape(orig_shape)
         )
@@ -234,13 +241,33 @@ def robust_scale_match(
     r_median = reference.median(dim=-1, keepdim=True).values
     r_mad = (reference - r_median).abs_().median(dim=-1, keepdim=True).values
 
+    output_mean = reference.mean(dim=-1, keepdim=True) if set_mean else r_median
+
     # Stretch the source to match the reference
     return (
-        src_sub_median.mul_(r_mad.div_(s_mad))
-        .add_(r_median)
+        source_adj.mul_(r_mad.div_(s_mad))
+        .add_(output_mean)
         .movedim(-1, start_dim)
         .reshape(orig_shape)
     )
+
+
+def ortho_projection(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    dim: Sequence[int] | None = None,
+    keepdim: bool = True,
+    eps: float = 1e-08,
+) -> torch.Tensor:
+    dim = tuple(
+        range(0 if a.ndim < 1 else 1, a.ndim)
+        if dim is None
+        else (dim if isinstance(dim, Sequence) else (dim,)),
+    )
+    dot_ab = (a * b).sum(dim=dim, keepdim=keepdim)
+    dot_aa = a.square().sum(dim=dim, keepdim=keepdim).clamp_min_(eps)
+    return dot_ab.div_(dot_aa) * a
 
 
 def hslerp(a, b, t):
@@ -1034,10 +1061,9 @@ def ortho_blend(
         if sync_t:
             t = t.unsqueeze(0)
     b_normed = b.norm(dim=-1, keepdim=True) if rescale_limit else None
-    dot_ba = (b * a).sum(dim=-1, keepdim=True)
-    dot_aa = (a**2).sum(dim=-1, keepdim=True)
-    proj = (dot_ba / (dot_aa + eps)) * a
-    proj *= proj_scale
+    proj = ortho_projection(a, b, dim=(-1,), eps=eps)
+    if proj_scale != 1:
+        proj *= proj_scale
     b_ortho = proj.add_(b if ortho_scale == 1.0 else b * ortho_scale)
     if b_normed is not None:
         rescale_limit = abs(rescale_limit)

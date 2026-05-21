@@ -1056,30 +1056,27 @@ class ContrastiveOrthoCFG(NamedTuple):
     use_noise: bool = False
     base_denoised: bool = False
 
-    def extract_common(self, cond: torch.Tensor, uncond: torch.Tensor) -> torch.Tensor:
-        return lutils.contrastive_ortho_cfg_base_a(
-            cond,
-            uncond,
-            1.0,
-            a_ortho_scale=-1.0,
-            b_ortho_scale=1.0,
-            start_dim=self.start_dim,
-            end_dim=self.end_dim,
-        )
-
     def extract_parts(
         self,
         cond: torch.Tensor,
         uncond: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        common = self.extract_common(cond, uncond)
-        unique_cond = cond - common
-        unique_uncond = uncond - common
+        ndim = cond.ndim
+        start_dim, end_dim = (
+            min(ndim - 1, d if d >= 0 else max(0, ndim + d))
+            for d in (self.start_dim, self.end_dim)
+        )
+        if start_dim > end_dim:
+            start_dim, end_dim = end_dim, start_dim
+        dims = tuple(range(start_dim, end_dim + 1))
+        uncond_par = lutils.ortho_projection(cond, uncond, dim=dims)
+        uncond_ortho = uncond - uncond_par
+        cond_ortho = cond - uncond_par
         if self.negative_scale != 1:
-            unique_uncond *= self.negative_scale
+            uncond_ortho *= self.negative_scale
         if self.positive_scale != 1:
-            unique_cond *= self.positive_scale
-        return common, unique_cond, unique_uncond
+            cond_ortho *= self.positive_scale
+        return uncond_par, cond_ortho, uncond_ortho
 
     def check_sigma(self, sigma: torch.Tensor) -> bool:
         sigma_f = sigma.mean().detach().cpu().item()
@@ -1124,7 +1121,10 @@ class ContrastiveOrthoCFG(NamedTuple):
             cond, uncond, denoised = (
                 (x - t).div_(sigma) for t in (cond, uncond, denoised)
             )
-        common, cond_unique, uncond_unique = self.extract_parts(cond, uncond)
+        common, cond_unique, uncond_unique = self.extract_parts(
+            denoised if self.base_denoised else cond,
+            uncond,
+        )
         denoised = cond_unique.sub_(uncond_unique).add_(
             common if self.base_denoised else denoised,
         )
