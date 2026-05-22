@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, TypeVar
 
 import torch
 
@@ -18,7 +18,10 @@ except ImportError:
     HAVE_WAVELETS = False
 
 
-def fallback[V, D](val: V | D, default: D = None) -> V | D:
+_V, _D = TypeVar("_V"), TypeVar("_D")
+
+
+def fallback(val: _V | _D, default: _D = None) -> _V | _D:
     return val if val is not None else default
 
 
