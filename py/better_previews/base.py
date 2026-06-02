@@ -66,15 +66,6 @@ VIDEO_FORMATS = {
             tae_model="taew2_2.pth",
         ),
         VideoModelInfo(
-            "ltxv",
-            latent_formats.LTXV,
-            fps=24,
-            patch_size=4,
-            temporal_layers=3,
-            tae_model="taeltx_2.pth",
-            tae_class=TAEVidLTX2,
-        ),
-        VideoModelInfo(
             "ltxav",
             latent_formats.LTXV,
             fps=24,
@@ -102,6 +93,12 @@ VIDEO_FORMATS = {
             tae_class=TAEVidLTX23Wide,
         ),
     )
+}
+
+VIDEO_FORMATS |= {
+    "ltxv": VIDEO_FORMATS["ltxav"]._replace(name="ltxv"),
+    "ltxv23": VIDEO_FORMATS["ltxav23"]._replace(name="ltxv23"),
+    "ltxv23wide": VIDEO_FORMATS["ltxav23wide"]._replace(name="ltxv23wide"),
 }
 
 AMBIGUOUS_VIDEO_FORMATS = {

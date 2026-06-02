@@ -67,7 +67,7 @@ class TAEVideoNodeBase:
         device = model_management.vae_device()
         dtype = model_management.vae_dtype(device=device)
         return (
-            TAEVid(checkpoint_path=tae_model_path, vmi=vmi, device=device).to(device),
+            vmi.tae_class(checkpoint_path=tae_model_path, vmi=vmi, device=device).to(device),
             device,
             dtype,
             vmi,
