@@ -6,6 +6,8 @@ from pathlib import Path
 class Settings:
     def __init__(self):
         self.btp_enabled = False
+        self.btp_publish_last_preview = False
+        self.btp_publish_last_preview_min_refresh = 5
 
     def update(self, obj):
         btp = obj.get("betterTaesdPreviews", None)
