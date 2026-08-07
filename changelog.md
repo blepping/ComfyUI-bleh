@@ -2,6 +2,11 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20260807
+
+* Initial support for Minimax H3 TAE models and previewing.
+* Better handling for A/V latents in TAEVid nodes.
+
 ## 20260518
 
 * Added `BlehConstrastiveOrthoCFG` node.

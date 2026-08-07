@@ -8,7 +8,7 @@ For recent user-visible changes, please see the [ChangeLog](changelog.md).
 
 * Better TAESD previews (see below).
 * Visual previews for some audio models (currently only ACE-Steps).
-* Multi-frame video previews for most common video models (Wan 2.2, 2.1, Hunyuan, LTX 2.3, etc). See [the section on video encode/decode](#blehtaevideoencode-and-blehtaevideodecode).
+* Multi-frame video previews for most common video models (Wan 2.2, 2.1, Hunyuan, LTX 2.3, Minimax H3, etc). See [the section on video encode/decode](#blehtaevideoencode-and-blehtaevideodecode).
 * Allow setting seed, timestep range and step interval for HyperTile (look for the [`BlehHyperTile`](#blehhypertile) node).
 * Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the [`BlehDeepShrink`](#blehdeepshrink) node).
 * Allow discarding penultimate sigma (look for the `BlehDiscardPenultimateSigma` node). This can be useful if you find certain samplers are ruining your image by spewing a bunch of noise into it at the very end (usually only an issue with `dpm2 a` or SDE samplers).
@@ -303,7 +303,7 @@ Ensures that Bleh's previewer is used. Generally not necessary unless some other
 
 ## BlehFixGuiderPreviewing
 
-Mostly only necessary for LTX previewing. You absolutely need to pass your guider through this for LTX (2.0, 2.3, 2.3 wide) previews to work. If you're generating videos with a FPS other than the video model's default (regardless of the video model type) then you can set `fps_override` to avoid your animated previews playing with the wrong speed. For LTX 2.3, you'll need to set `prefer_previewer` to `ltxav23` or `ltxav23wide` because there isn't a way for a previewer to detect whether the latent is in LTX 2.0 or LTX 2.3 format. I've been using the wide LTX 2.3 version (linked below) - it's better quality, but possibly somewhat higher resource usage.
+Mostly only necessary for audio/viduo model previewing (currently LTX and Minimax H3). You absolutely need to pass your guider through this for LTX (2.0, 2.3, 2.3 wide) or Minimax H3 previews to work. If you're generating videos with a FPS other than the video model's default (regardless of the video model type) then you can set `fps_override` to avoid your animated previews playing with the wrong speed. For LTX 2.3, you'll need to set `prefer_previewer` to `ltxav23` or `ltxav23wide` because there isn't a way for a previewer to detect whether the latent is in LTX 2.0 or LTX 2.3 format. I've been using the wide LTX 2.3 version (linked below) - it's better quality, but possibly somewhat higher resource usage.
 
 ### BlehTAEVideoEncode and BlehTAEVideoDecode
 
@@ -311,13 +311,14 @@ Fast video latent encoding/decoding with models from madebyollin (same person th
 
 You will need to download the models and put them in `models/vae_approx`. Don't change the names.
 
-* **WAN 2.2**: https://github.com/madebyollin/taehv/blob/main/taew2_2.pth — **Note**: Confusingly, the Wan 2.2 14B models do _not_ use the Wan 2.2 latent format, they use 2.1. This is (as far as I know) only for use with the smaller 5B Wan 2.2 model.
-* **WAN 2.1**: https://github.com/madebyollin/taehv/blob/main/taew2_1.pth
 * **Hunyean**: https://github.com/madebyollin/taehv/blob/main/taehv.pth
-* **Mochi**: https://github.com/madebyollin/taem1/blob/main/taem1.pth
 * **LTX 2.0**: https://github.com/madebyollin/taehv/blob/main/laeltx_2.pth
-* **LTX 2.3**: https://github.com/madebyollin/taehv/blob/main/laeltx2_3.pth
 * **LTX 2.3 wide**: https://github.com/madebyollin/taehv/blob/2026_03_11_taeltx23_wide/taeltx2_3_wide.pth
+* **LTX 2.3**: https://github.com/madebyollin/taehv/blob/main/laeltx2_3.pth
+* **Minimax H3**: https://github.com/madebyollin/taehv/blob/main/taeh3.pth
+* **Mochi**: https://github.com/madebyollin/taem1/blob/main/taem1.pth
+* **WAN 2.1**: https://github.com/madebyollin/taehv/blob/main/taew2_1.pth
+* **WAN 2.2**: https://github.com/madebyollin/taehv/blob/main/taew2_2.pth — **Note**: Confusingly, the Wan 2.2 14B models do _not_ use the Wan 2.2 latent format, they use 2.1. This is (as far as I know) only for use with the smaller 5B Wan 2.2 model.
 
 *Note*: If you run into issues it's probably a problem with my implementation and not the TAE video models or original inference code.
 

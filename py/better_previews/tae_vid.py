@@ -159,21 +159,24 @@ class TAEVidContext:
         b: nn.Module,
     ) -> Iterable[torch.Tensor]:
         mem = self.mem
+        stride = b.stride
+        next_mlen = 1 if mem[i] is None else len(mem[i]) + 1
         # pool blocks are miserable
-        if mem[i] is None:
-            mem[i] = []  # pool memory is itself a queue of inputs to pool
-        mem[i].append(xt)
-        if len(mem[i]) > b.stride:
+        if b.stride < 1 or next_mlen > stride:
             # pool mem is in invalid state, we should have pooled before this
             raise RuntimeError("Internal error: Invalid mem state")
-        if len(mem[i]) < b.stride:
+        if next_mlen == 1:
+            # pool memory is itself a queue of inputs to pool
+            mem[i] = [xt]
+        else:
+            mem[i].append(xt)
+        if next_mlen < stride:
             # pool mem is not yet full, go back to processing the work queue
             return ()
         # pool mem is ready, run the pool block
-        N, C, H, W = xt.shape
-        xt = b(torch.cat(mem[i], 1).view(N * b.stride, C, H, W))
+        xt = b(torch.cat(mem[i], 1).view(xt.shape[0] * stride, *xt.shape[1:]))
         # reset the pool mem
-        mem[i] = []
+        mem[i].clear()
         return (xt,)
 
     def handle_tgrow(
@@ -228,12 +231,13 @@ class TAEVidContext:
 class TAEVidBase(nn.Module):
     temporal_upscale_blocks = 3
     spatial_upscale_blocks = 3
+    context_class = TAEVidContext
     _nf = (256, 128, 64, 64)
 
     def __init__(
         self,
         *,
-        checkpoint_path: str | Path,
+        checkpoint_path: str | Path | None,
         vmi: VideoModelInfo,
         image_channels: int = 3,
         device="cpu",
@@ -263,11 +267,34 @@ class TAEVidBase(nn.Module):
         )
         self.t_upscale = 2 ** sum(decoder_time_upscale)
         self.t_downscale = 2 ** sum(encoder_time_downscale)
-        self.frames_to_trim = self.t_upscale - 1
         if checkpoint_path is None:
             return
         sd = torch.load(checkpoint_path, map_location=device, weights_only=True)
         self.load_state_dict(self.patch_tgrow_layers(sd))
+
+    @property
+    def decode_frames_to_trim_head(self) -> int:
+        return self.t_upscale - 1
+
+    @property
+    def decode_frames_to_trim_tail(self) -> int:
+        return 0
+
+    def decode_trim(self, x: torch.Tensor) -> torch.Tensor:
+        h, t = self.decode_frames_to_trim_head, self.decode_frames_to_trim_tail
+        return x if h == 0 and t == 0 else x[:, h : None if t < 1 else -t]
+
+    @property
+    def encode_frames_to_trim_head(self) -> int:
+        return 0
+
+    @property
+    def encode_frames_to_trim_tail(self) -> int:
+        return 0
+
+    def encode_trim(self, x: torch.Tensor) -> torch.Tensor:
+        h, t = self.encode_frames_to_trim_head, self.encode_frames_to_trim_tail
+        return x if h == 0 and t == 0 else x[:, h : None if t < 1 else -t]
 
     def _get_decoder_flags(
         self,
@@ -376,39 +403,71 @@ class TAEVidBase(nn.Module):
         t = nt // n
         return x.view(n, t, c, h, w)
 
+    def encode_preprocess(
+        self,
+        x: torch.Tensor,
+        *,
+        allow_padding: bool = True,
+    ) -> torch.Tensor:
+        if self.patch_size > 1:
+            x = F.pixel_unshuffle(x, self.patch_size)
+        if not allow_padding or (
+            self.t_downscale and x.shape[1] % self.t_downscale == 0
+        ):
+            return x
+        # Pad handling copied from https://github.com/madebyollin
+        # pad at end to multiple of self.t_downscale
+        n_pad = self.t_downscale - x.shape[1] % self.t_downscale
+        padding = x[:, -1:].repeat_interleave(n_pad, dim=1)
+        return torch.cat((x, padding), 1)
+
+    def decode_postprocess(self, x: torch.Tensor) -> torch.Tensor:
+        return F.pixel_shuffle(x, self.patch_size) if self.patch_size > 1 else x
+
+    def apply_encode(
+        self,
+        x: torch.Tensor,
+        *,
+        parallel: bool = True,
+        show_progress: bool = False,
+        allow_padding: bool = True,
+    ) -> torch.Tensor:
+        model = self.encoder
+        x = self.encode_preprocess(x, allow_padding=allow_padding)
+        if parallel:
+            return self.apply_parallel(x, model, show_progress=show_progress)
+        return self.context_class(model).apply(x, show_progress=show_progress)
+
+    def apply_decode(
+        self,
+        x: torch.Tensor,
+        *,
+        parallel=True,
+        show_progress=False,
+    ) -> torch.Tensor:
+        model = self.decoder
+        if parallel:
+            result = self.apply_parallel(x, model, show_progress=show_progress)
+        else:
+            result = self.context_class(model).apply(x, show_progress=show_progress)
+        return self.decode_postprocess(result)
+
     def apply(
         self,
         x: torch.Tensor,
         *,
         decode=True,
-        parallel=True,
-        show_progress=False,
+        **kwargs: Any,
     ) -> torch.Tensor:
-        model = self.decoder if decode else self.encoder
-        if not decode:
-            if self.vmi.patch_size > 1:
-                x = F.pixel_unshuffle(x, self.patch_size)
-            # Pad handling copied from https://github.com/madebyollin
-            if x.shape[1] % self.t_downscale != 0:
-                # pad at end to multiple of self.t_downscale
-                n_pad = self.t_downscale - x.shape[1] % self.t_downscale
-                padding = x[:, -1:].repeat_interleave(n_pad, dim=1)
-                x = torch.cat((x, padding), 1)
-        if parallel:
-            result = self.apply_parallel(x, model, show_progress=show_progress)
-        else:
-            result = TAEVidContext(model).apply(x, show_progress=show_progress)
-        return (
-            result
-            if not decode or self.vmi.patch_size < 2
-            else F.pixel_shuffle(result, self.patch_size)
-        )
+        if decode:
+            return self.apply_decode(x, **kwargs)
+        return self.apply_encode(x, **kwargs)
 
-    def decode(self, *args: list, **kwargs: dict) -> torch.Tensor:
-        return self.apply(*args, decode=True, **kwargs)[:, self.frames_to_trim :]
+    def decode(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return self.decode_trim(self.apply(*args, decode=True, **kwargs))
 
-    def encode(self, *args: list, **kwargs: dict) -> torch.Tensor:
-        return self.apply(*args, decode=False, **kwargs)
+    def encode(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return self.encode_trim(self.apply(*args, decode=False, **kwargs))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.c(x)
@@ -470,3 +529,80 @@ class TAEVidLTX23Wide(TAEVidLTX2):
         memblock_kwargs = {} if memblock_kwargs is None else memblock_kwargs.copy()
         memblock_kwargs["wide"] = True
         return super()._build_decoder(*args, memblock_kwargs=memblock_kwargs, **kwargs)
+
+
+# H3 input/output preprocessing modified/referenced from https://github.com/madebyollin/taehv/commit/62f7591f59dfbb4c3c02b7a621d180a9eeaba26c
+class TAEVidH3(TAEVidBase):
+    def _get_encoder_flags(
+        self,
+        *,
+        time_level: int = 3,  # noqa: ARG002
+    ) -> tuple[bool, ...]:
+        return (True, True, False)
+
+    def _get_decoder_flags(
+        self,
+        *,
+        time_level: int = 3,  # noqa: ARG002
+        space_level: int = 3,  # noqa: ARG002
+    ) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
+        return (False, True, True), (True, True, True)
+
+    @property
+    def encode_frames_to_trim_tail(self) -> int:
+        return 3
+
+    def decode_trim(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    def apply_encode(
+        self,
+        x: torch.Tensor,
+        *,
+        parallel: bool = True,
+        show_progress: bool = False,
+        allow_padding: bool = False,
+    ) -> torch.Tensor:
+        batch = x.shape[0]
+        x = torch.cat((x, x[:, -1:].expand(-1, -x.shape[1] % 17, -1, -1, -1)), dim=1)
+        x = F.pad(x.reshape(batch, -1, 17, *x.shape[2:]), (0, 0, 0, 0, 0, 0, 3, 0))
+        model = self.encoder
+        x = self.encode_preprocess(x, allow_padding=allow_padding)
+        if parallel:
+            x = self.apply_parallel(
+                x.flatten(end_dim=1),
+                model,
+                show_progress=show_progress,
+            )
+            return x.reshape(batch, -1, *x.shape[2:])
+        ctx = self.context_class(model)
+        return torch.cat(
+            tuple(
+                ctx.apply(chunk)
+                for chunk in tqdm(x.unbind(1), disable=not show_progress)
+            ),
+            dim=1,
+        )
+
+    def apply_decode(
+        self,
+        x: torch.Tensor,
+        *,
+        parallel=True,
+        show_progress=False,
+    ) -> torch.Tensor:
+        frames = x.shape[1]
+        model = self.decoder
+        if parallel:
+            result = self.apply_parallel(x, model, show_progress=show_progress)
+        else:
+            result = self.context_class(model).apply(x, show_progress=show_progress)
+        chunk_frames = 5 * self.t_upscale
+        result = F.pad(result, (0, 0, 0, 0, 0, 0, 0, -result.shape[1] % chunk_frames))
+        result = result.unflatten(1, (-1, chunk_frames))[
+            :,
+            :,
+            self.decode_frames_to_trim_head :,
+        ].flatten(1, 2)[:, : -3 * self.t_upscale]
+        result = self.decode_postprocess(result)
+        return result if frames > 1 else result[:, :1]

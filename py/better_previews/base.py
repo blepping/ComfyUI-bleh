@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from comfy import latent_formats
 
-from .tae_vid import TAEVid, TAEVidBase, TAEVidLTX2, TAEVidLTX23Wide
+from . import tae_vid as tv
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -19,7 +19,7 @@ class VideoModelInfo(NamedTuple):
     patch_size: int = 1
     nested_tensor_index: int = 0
     tae_model: str | Path | None = None
-    tae_class: TAEVidBase | None = TAEVid
+    tae_class: tv.TAEVidBase | None = tv.TAEVid
 
 
 VIDEO_FORMATS = {
@@ -72,7 +72,7 @@ VIDEO_FORMATS = {
             patch_size=4,
             temporal_layers=3,
             tae_model="taeltx_2.pth",
-            tae_class=TAEVidLTX2,
+            tae_class=tv.TAEVidLTX2,
         ),
         VideoModelInfo(
             "ltxav23",
@@ -81,7 +81,7 @@ VIDEO_FORMATS = {
             patch_size=4,
             temporal_layers=3,
             tae_model="taeltx2_3.pth",
-            tae_class=TAEVidLTX2,
+            tae_class=tv.TAEVidLTX2,
         ),
         VideoModelInfo(
             "ltxav23wide",
@@ -90,7 +90,17 @@ VIDEO_FORMATS = {
             patch_size=4,
             temporal_layers=3,
             tae_model="taeltx2_3_wide.pth",
-            tae_class=TAEVidLTX23Wide,
+            tae_class=tv.TAEVidLTX23Wide,
+        ),
+        VideoModelInfo(
+            "minimaxh3av",
+            latent_formats.MiniMaxH3Video,
+            fps=24,
+            patch_size=2,
+            temporal_layers=3,
+            temporal_compression=4,
+            tae_model="taeh3.pth",
+            tae_class=tv.TAEVidH3,
         ),
     )
 }
@@ -99,6 +109,7 @@ VIDEO_FORMATS |= {
     "ltxv": VIDEO_FORMATS["ltxav"]._replace(name="ltxv"),
     "ltxv23": VIDEO_FORMATS["ltxav23"]._replace(name="ltxv23"),
     "ltxv23wide": VIDEO_FORMATS["ltxav23wide"]._replace(name="ltxv23wide"),
+    "minimaxh3video": VIDEO_FORMATS["minimaxh3av"]._replace(name="minimaxh3video"),
 }
 
 AMBIGUOUS_VIDEO_FORMATS = {
