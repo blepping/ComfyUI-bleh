@@ -303,7 +303,7 @@ Ensures that Bleh's previewer is used. Generally not necessary unless some other
 
 ## BlehFixGuiderPreviewing
 
-Mostly only necessary for audio/viduo model previewing (currently LTX and Minimax H3). You absolutely need to pass your guider through this for LTX (2.0, 2.3, 2.3 wide) or Minimax H3 previews to work. If you're generating videos with a FPS other than the video model's default (regardless of the video model type) then you can set `fps_override` to avoid your animated previews playing with the wrong speed. For LTX 2.3, you'll need to set `prefer_previewer` to `ltxav23` or `ltxav23wide` because there isn't a way for a previewer to detect whether the latent is in LTX 2.0 or LTX 2.3 format. I've been using the wide LTX 2.3 version (linked below) - it's better quality, but possibly somewhat higher resource usage.
+Mostly only necessary for audio/video model previewing (currently LTX and Minimax H3). You absolutely need to pass your guider through this for LTX (2.0, 2.3, 2.3 wide) or Minimax H3 previews to work. If you're generating videos with a FPS other than the video model's default (regardless of the video model type) then you can set `fps_override` to avoid your animated previews playing with the wrong speed. For LTX 2.3, you'll need to set `prefer_previewer` to `ltxav23` or `ltxav23wide` because there isn't a way for a previewer to detect whether the latent is in LTX 2.0 or LTX 2.3 format. I've been using the wide LTX 2.3 version (linked below) - it's better quality, but possibly somewhat higher resource usage.
 
 ### BlehTAEVideoEncode and BlehTAEVideoDecode
 
