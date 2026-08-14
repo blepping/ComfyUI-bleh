@@ -607,7 +607,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
             and self.fallback_previewer_model.device == device
         ):
             return True
-        if self.latent_format_name in {"aceaudio", "aceaudio15"}:
+        if self.latent_format_name in {"aceaudio", "aceaudio15", "minimaxmusic3"}:
             self.fallback_previewer_model = ACEStepsPreviewerModel(
                 device=device,
                 dtype=dtype,
@@ -651,7 +651,10 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         expected_ndim = 2 + self.latent_format.latent_dimensions
         if x0.shape[0] == 0:
             return x0, False
-        if self.latent_format_name == "aceaudio15" and x0.ndim == expected_ndim + 1:
+        if (
+            self.latent_format_name in {"aceaudio15", "minimaxmusic3"}
+            and x0.ndim == expected_ndim + 1
+        ):
             expected_ndim += 1
         if (
             x0.ndim > 1
@@ -751,7 +754,7 @@ def bleh_get_previewer(
         or (SETTINGS.btp_whitelist and format_name not in SETTINGS.btp_whitelist)
     ):
         return orig_get_previewer()
-    if format_name in {"aceaudio", "aceaudio15"}:
+    if format_name in {"aceaudio", "aceaudio15", "minimaxmusic3"}:
         return BetterPreviewer(latent_format=latent_format)
     vid_info = VIDEO_FORMATS.get(format_name)
     eff_latent_format = (
