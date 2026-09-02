@@ -7,7 +7,7 @@ For recent user-visible changes, please see the [ChangeLog](changelog.md).
 ## Features
 
 * Better TAESD previews (see below).
-* Visual previews for some audio models (currently only ACE-Steps).
+* Visual previews for some audio models (ACE-Step and MiniMax Music3).
 * Multi-frame video previews for most common video models (Wan 2.2, 2.1, Hunyuan, LTX 2.3, Minimax H3, etc). See [the section on video encode/decode](#blehtaevideoencode-and-blehtaevideodecode).
 * Allow setting seed, timestep range and step interval for HyperTile (look for the [`BlehHyperTile`](#blehhypertile) node).
 * Allow applying Kohya Deep Shrink to multiple blocks, also allow gradually fading out the downscale factor (look for the [`BlehDeepShrink`](#blehdeepshrink) node).
@@ -22,7 +22,7 @@ For recent user-visible changes, please see the [ChangeLog](changelog.md).
 
 ## Configuration
 
-Copy either `blehconfig.yaml.example` to `blehconfig.yaml` and edit the copy. Bleh will also check for a `blehconfig.json` file when starting up if the YAML one doesn't exist. I recommend using YAML here.
+Copy `blehconfig.yaml.example` to `blehconfig.yaml` and edit the copy. Bleh will also check for a `blehconfig.json` file when starting up if the YAML one doesn't exist. I recommend using YAML here.
 
 Restart ComfyUI to apply any new changes.
 
@@ -30,13 +30,13 @@ Restart ComfyUI to apply any new changes.
 
 There are links to the various TAE models used for high quality previewing near the bottom of this README.
 
-* Supports setting max preview size (ComfyUI default is hardcoded to 512 max).
-* Supports showing previews for more than the first latent in the batch.
+* Supports setting max preview size.
+* Supports showing previews for more than the first latent in the batch. You can preview batch items on a grid or even as an animation.
 * Supports throttling previews. Do you really need your expensive high quality preview to get updated 3 times a second?
 * Supports LTX (2.0 and 2.3). **Note**: You need to use the `BlehFixGuiderPreviewing` node for LTX. See the description of it below.
 
-The previewer can now show visual previews for ACE-Steps (1.0 and 1.5) latents. If you want to disable that feature, you can add `aceaudio` to the
-`blacklist_formats` list. For example if you are using a YAML configuration file you could do: `blacklist_formats: ["aceaudio"]`
+The previewer can now show visual previews for some audio models: ACE-Step 1.0 (`aceaudio`), ACE-Step 1.5 (`aceaudio15`), and MiniMax Music3 (`minimaxmusic3`). If you want to disable that feature, you can add the latent format name (parenthesized part, I.E. `aceaudio`) to the
+`blacklist_formats` list. For example if you are using a YAML configuration file you could use: `blacklist_formats: ["aceaudio", "minimaxmusic3"]`
 
 **General settings defaults:**
 
@@ -303,7 +303,7 @@ Ensures that Bleh's previewer is used. Generally not necessary unless some other
 
 ## BlehFixGuiderPreviewing
 
-Mostly only necessary for audio/video model previewing (currently LTX and Minimax H3). You absolutely need to pass your guider through this for LTX (2.0, 2.3, 2.3 wide) or Minimax H3 previews to work. If you're generating videos with a FPS other than the video model's default (regardless of the video model type) then you can set `fps_override` to avoid your animated previews playing with the wrong speed. For LTX 2.3, you'll need to set `prefer_previewer` to `ltxav23` or `ltxav23wide` because there isn't a way for a previewer to detect whether the latent is in LTX 2.0 or LTX 2.3 format. I've been using the wide LTX 2.3 version (linked below) - it's better quality, but possibly somewhat higher resource usage.
+Necessary for LTX video previews to work (make sure you set prefer preview as described below). For recent ComfyUI versions, you shouldn't need this for other A/V models unless you want to do something like override the FPS. If you're generating videos with a FPS other than the video model's default (regardless of the video model type) then you can set `fps_override` to avoid your animated previews playing with the wrong speed. For LTX 2.3, you'll need to set `prefer_previewer` to `ltxav23` or `ltxav23wide` because there isn't a way for a previewer to detect whether the latent is in LTX 2.0 or LTX 2.3 format. I've been using the wide LTX 2.3 version (linked below) - it's better quality, but possibly somewhat higher resource usage.
 
 ### BlehTAEVideoEncode and BlehTAEVideoDecode
 
@@ -312,9 +312,9 @@ Fast video latent encoding/decoding with models from madebyollin (same person th
 You will need to download the models and put them in `models/vae_approx`. Don't change the names.
 
 * **Hunyean**: https://github.com/madebyollin/taehv/blob/main/taehv.pth
-* **LTX 2.0**: https://github.com/madebyollin/taehv/blob/main/laeltx_2.pth
+* **LTX 2.0**: https://github.com/madebyollin/taehv/blob/main/taeltx_2.pth
 * **LTX 2.3 wide**: https://github.com/madebyollin/taehv/blob/2026_03_11_taeltx23_wide/taeltx2_3_wide.pth
-* **LTX 2.3**: https://github.com/madebyollin/taehv/blob/main/laeltx2_3.pth
+* **LTX 2.3**: https://github.com/madebyollin/taehv/blob/main/taeltx2_3.pth
 * **Minimax H3**: https://github.com/madebyollin/taehv/blob/main/taeh3.pth
 * **Mochi**: https://github.com/madebyollin/taem1/blob/main/taem1.pth
 * **WAN 2.1**: https://github.com/madebyollin/taehv/blob/main/taew2_1.pth

@@ -29,20 +29,20 @@ VIDEO_FORMATS = {
             "mochi",
             latent_formats.Mochi,
             temporal_compression=6,
-            tae_model="taem1.pth",
+            tae_model="taem1",
         ),
         VideoModelInfo(
             "hunyuanvideo",
             latent_formats.HunyuanVideo,
             temporal_compression=4,
-            tae_model="taehv.pth",
+            tae_model="taehv",
         ),
         VideoModelInfo(
             "hunyuanvideo15",
             latent_formats.HunyuanVideo15,
             temporal_compression=4,
             patch_size=2,
-            tae_model="taehv1_5.pth",
+            tae_model="taehv1_5",
         ),
         VideoModelInfo(
             "cosmos1cv8x8x8",
@@ -54,7 +54,7 @@ VIDEO_FORMATS = {
             fps=16,
             temporal_compression=4,
             temporal_layers=2,
-            tae_model="taew2_1.pth",
+            tae_model="taew2_1",
         ),
         VideoModelInfo(
             "wan22",
@@ -63,7 +63,7 @@ VIDEO_FORMATS = {
             temporal_compression=4,
             temporal_layers=2,
             patch_size=2,
-            tae_model="taew2_2.pth",
+            tae_model="taew2_2",
         ),
         VideoModelInfo(
             "ltxav",
@@ -71,7 +71,7 @@ VIDEO_FORMATS = {
             fps=24,
             patch_size=4,
             temporal_layers=3,
-            tae_model="taeltx_2.pth",
+            tae_model="taeltx_2",
             tae_class=tv.TAEVidLTX2,
         ),
         VideoModelInfo(
@@ -80,7 +80,7 @@ VIDEO_FORMATS = {
             fps=24,
             patch_size=4,
             temporal_layers=3,
-            tae_model="taeltx2_3.pth",
+            tae_model="taeltx2_3",
             tae_class=tv.TAEVidLTX2,
         ),
         VideoModelInfo(
@@ -89,7 +89,7 @@ VIDEO_FORMATS = {
             fps=24,
             patch_size=4,
             temporal_layers=3,
-            tae_model="taeltx2_3_wide.pth",
+            tae_model="taeltx2_3_wide",
             tae_class=tv.TAEVidLTX23Wide,
         ),
         VideoModelInfo(
@@ -99,7 +99,7 @@ VIDEO_FORMATS = {
             patch_size=2,
             temporal_layers=3,
             temporal_compression=4,
-            tae_model="taeh3.pth",
+            tae_model="taeh3",
             tae_class=tv.TAEVidH3,
         ),
     )

@@ -2,7 +2,6 @@
 
 import math
 
-import folder_paths
 import torch
 from comfy import model_management
 
@@ -11,7 +10,11 @@ try:
 except (ImportError, ModuleNotFoundError):
     nested_tensor = None
 
-from ..better_previews.previewer import VIDEO_FORMATS, VideoModelInfo
+from ..better_previews.previewer import (
+    VIDEO_FORMATS,
+    VideoModelInfo,
+    find_previewer_model,
+)
 from ..better_previews.tae_vid import TAEVid
 
 
@@ -58,7 +61,7 @@ class TAEVideoNodeBase:
         vmi = VIDEO_FORMATS.get(latent_type)
         if vmi is None or vmi.tae_model is None:
             raise ValueError("Bad latent type")
-        tae_model_path = folder_paths.get_full_path("vae_approx", vmi.tae_model)
+        tae_model_path = find_previewer_model(str(vmi.tae_model))
         if tae_model_path is None:
             dl_info = cls._download_map.get(latent_type)
             if dl_info is None:
@@ -91,7 +94,7 @@ class TAEVideoNodeBase:
 class TAEVideoDecode(TAEVideoNodeBase):
     RETURN_TYPES = ("IMAGE",)
     CATEGORY = "latent"
-    DESCRIPTION = "Fast decoding of Wan, Hunyuan, Mochi and LTX video latents with the video equivalent of TAESD."
+    DESCRIPTION = "Fast decoding of video latents with the video equivalent of TAESD."
 
     @classmethod
     def INPUT_TYPES(cls) -> dict:
@@ -117,7 +120,7 @@ class TAEVideoDecode(TAEVideoNodeBase):
             )
             .movedim(2, -1)
             .to(
-                dtype=torch.float,
+                dtype=torch.float32,
                 device="cpu",
             )
         )
@@ -128,7 +131,7 @@ class TAEVideoDecode(TAEVideoNodeBase):
 class TAEVideoEncode(TAEVideoNodeBase):
     RETURN_TYPES = ("LATENT",)
     CATEGORY = "latent"
-    DESCRIPTION = "Fast encoding of Wan, Hunyuan, Mochi and LTX video latents with the video equivalent of TAESD."
+    DESCRIPTION = "Fast encoding of video latents with the video equivalent of TAESD."
 
     @classmethod
     def INPUT_TYPES(cls) -> dict:
@@ -207,11 +210,14 @@ class TAEVideoEncode(TAEVideoNodeBase):
             parallel=parallel_mode,
             show_progress=True,
         ).transpose(1, 2)
+        if frames == 1 and latent.shape[2] > 1:
+            # Trim to one frame for single image encoding.
+            latent = latent[:, :, :1, ...]
         latent = (
             vmi.latent_format()
             .process_out(latent)
             .to(
-                dtype=torch.float,
+                dtype=torch.float32,
                 device="cpu",
             )
         )

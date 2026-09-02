@@ -21,6 +21,11 @@ previews:
     # Minimum time between updating previews. The default will update the preview at most once per second.
     throttle_secs: 1
 
+    # Can be set to use a different throttle time for video previews.
+    # Only applies when generating more than one frame.
+    # If unset or null it will use throttle_secs.
+    throttle_secs_video: 6
+
     # Can be set to use a different throttle time when using the fallback previewer
     # (anything other than TAESD or TAEVID). If unset or null it will use throttle_secs.
     throttle_secs_fallback: null
@@ -34,7 +39,7 @@ previews:
 
     # Can be set to override the previewer dtype (which probably defaults to float32).
     # You may set it to a specific dtype: float32, float16, bfloat16
-    # Setting it to "keep" or null just leaves the dtype alone (which is probably float32).
+    # Setting it to "keep" just leaves the dtype alone (which is probably float32).
     # Setting it to "vae" will use whatever dtype ComfyUI is set to use for VAE.
     preview_dtype: bfloat16
 
@@ -90,7 +95,7 @@ previews:
     #   video: Use animated previews for video generations.
     #   batch: Use animated previews for batch generations (batch items will be frames.)
     #   both: Use animated previews for video and batch generations.
-    animate_preview: none
+    animate_preview: video
 
     # When enabled, this will add `/bleh/last_preview.html` and `/bleh/last_preview` paths
     # under whatever URI you use to access ComfyUI. The HTML version will serve a webpage
