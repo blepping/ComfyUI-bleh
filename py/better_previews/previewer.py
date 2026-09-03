@@ -429,13 +429,15 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         return False
 
     def calculate_indexes(self, batch_size: int, *, is_video=False) -> tuple:
-        max_batch = min(
-            batch_size,
-            self.pcfg.video_max_frames
-            if is_video and self.pcfg.video_max_frames >= 0
-            else self.pcfg.max_batch,
+        max_batch = (
+            batch_size
+            if is_video and self.pcfg.video_max_frames <= 0
+            else min(
+                batch_size,
+                self.pcfg.video_max_frames if is_video else self.pcfg.max_batch,
+            )
         )
-        if max_batch < 0:
+        if max_batch < 0 or max_batch == batch_size:
             return tuple(range(batch_size))
         if not self.pcfg.maxed_batch_step_mode:
             return tuple(range(min(max_batch, batch_size)))
