@@ -56,7 +56,7 @@ class PreviewDtype(Blenum):
             pdt.FLOAT64: torch.float64,
             pdt.FLOAT32: torch.float32,
             pdt.FLOAT16: torch.float16,
-            pdt.BFLOAT16: torch.float16,
+            pdt.BFLOAT16: torch.bfloat16,
         }.get(self)
 
 
@@ -94,6 +94,13 @@ class PreviewSettings(NamedTuple):
     publish_last_preview: bool = False
     publish_last_preview_min_refresh: float = 5
     only_animate_last_preview: bool = True
+
+    def get_throttle(self, *, video: bool = False, fallback: bool = False) -> float:
+        if fallback and self.throttle_secs_fallback is not None:
+            return self.throttle_secs_fallback
+        if video and self.throttle_secs_video is not None:
+            return self.throttle_secs_video
+        return self.throttle_secs
 
     @classmethod
     def handle_complex_field(

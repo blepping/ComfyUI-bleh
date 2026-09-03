@@ -168,7 +168,7 @@ class ImageWrapper:
             last_preview.LAST_PREVIEW.update(
                 image_bytes=result,
                 content_type=f"image/{result_format}",
-                duration=2 + int(len(self._frames) / max(1, self._frame_duration)),
+                duration=2 + int((len(self._frames) * self._frame_duration) / 1000),
             )
         fp.write(preview_result)
 
@@ -439,18 +439,12 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         )
         if max_batch < 0 or max_batch == batch_size:
             return tuple(range(batch_size))
-        if not self.pcfg.maxed_batch_step_mode:
+        if not self.pcfg.maxed_batch_step_mode or max_batch >= batch_size:
             return tuple(range(min(max_batch, batch_size)))
-        result = tuple(
-            range(
-                0,
-                batch_size,
-                math.ceil(batch_size / max_batch),
-            ),
-        )
-        if len(result) < max_batch and max_batch - 1 not in result:
-            return (*result, max_batch - 1)
-        return result[:max_batch]
+        if max_batch <= 1:
+            return (0,)
+        step = (batch_size - 1) / (max_batch - 1)
+        return tuple(round(i * step) for i in range(max_batch))
 
     def prepare_decode_latent(
         self,
@@ -466,7 +460,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         batch = x0.shape[0]
         height, width = x0.shape[-2:]
         cols, rows = self.calc_cols_rows(
-            batch_size=min(batch, self.pcfg.max_batch),
+            batch_size=batch,
             width=width,
             height=height,
             max_cols=self.pcfg.max_batch_cols,
@@ -613,8 +607,8 @@ class BetterPreviewer(_ORIG_PREVIEWER):
     def decoded_to_image(
         self,
         samples: torch.Tensor,
-        cols: int,
-        rows: int,
+        cols: int | None = None,
+        rows: int | None = None,
         *,
         video_frames: int = 0,
     ) -> Image | ImageWrapper:
@@ -633,23 +627,22 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         )
         if animate:
             return self.decoded_to_animation(samples, video_frames=video_frames)
-        cols, rows = self.calc_cols_rows(
-            batch_size=batch,
-            width=width,
-            height=height,
-            max_cols=self.pcfg.max_batch_cols,
-        )
+        if cols is None or rows is None:
+            cols, rows = self.calc_cols_rows(
+                batch_size=batch,
+                width=width,
+                height=height,
+                max_cols=self.pcfg.max_batch_cols,
+            )
         img_size = (width * cols, height * rows)
-        if self.cached is not None and self.cached.size == img_size:
-            result = self.cached
-        else:
-            self.cached = result = Image.new("RGB", size=(width * cols, height * rows))
+        result = Image.new("RGB", size=img_size)
         for idx in range(batch):
             result.paste(
                 Image.fromarray(samples[idx]),
                 box=((idx % cols) * width, ((idx // cols) % rows) * height),
             )
-        return ImageWrapper((result,))
+        self.cached = ImageWrapper((result,))
+        return self.cached
 
     @torch.no_grad()
     def init_fallback_previewer(
@@ -757,11 +750,10 @@ class BetterPreviewer(_ORIG_PREVIEWER):
     def decode_latent_to_preview(self, x0: torch.Tensor) -> Image:
         pcfg = self.pcfg
         using_fallback = (
-            self.oom_count and not self.oom_retry
+            self.oom_count and not self.pcfg.oom_retry
         ) or self.previewer_model is None
-        throttle = pcfg.throttle_secs_fallback if using_fallback else pcfg.throttle_secs
         if self.vid_info is None or using_fallback:
-            if self.check_use_cached(throttle):
+            if self.check_use_cached(pcfg.get_throttle(fallback=using_fallback)):
                 return self.cached
             checked_cache = True
         else:
@@ -773,11 +765,13 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         video_frames = x0.shape[2] if is_video else 0
         is_multiframe_video = is_video and video_frames > 1
         eff_video_frames = video_frames if is_multiframe_video else 0
-        if not checked_cache:
-            if not using_fallback and (is_video and is_multiframe_video):
-                throttle = pcfg.throttle_secs_video
-            if self.check_use_cached(throttle):
-                return self.cached
+        if not checked_cache and self.check_use_cached(
+            pcfg.get_throttle(
+                fallback=using_fallback,
+                video=is_video and is_multiframe_video,
+            ),
+        ):
+            return self.cached
         if using_fallback:
             return self.fallback_previewer(x0, quiet=True)
         used_fallback = False
@@ -793,6 +787,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 video_frames=eff_video_frames,
             )
         except torch.OutOfMemoryError:
+            self.oom_count += 1
             used_fallback = True
             result = self.fallback_previewer(x0)
         if pcfg.verbose:

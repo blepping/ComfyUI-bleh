@@ -110,9 +110,9 @@ previews:
     # once every this many seconds.
     publish_last_preview_min_refresh: 5
 
-    # Only applies when you have a preview that would be animated and publish_last_preview
-    # is enabled. When this is turned on, the image sent to ComfyUI for the preview is one
-    # frame, while the image under the last preview may be animated. You probably want to
+    # When enabled and a preview is eligible for animation, the animation version will only
+    # go to the last preview endpoint. If you don't have the last preview endpoint enabled,
+    # then this effectively disabling animations completely. You probably want to
     # leave this on the default because previews can only animated with "Nodes 2.0" which
     # you probably don't want to use, so sending an animated preview to the sampler is pointless.
     only_animate_last_preview: true
