@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from io import BytesIO
 from time import time
 from typing import TYPE_CHECKING, Any
@@ -428,10 +429,11 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         return False
 
     def calculate_indexes(self, batch_size: int, *, is_video=False) -> tuple:
-        max_batch = (
+        max_batch = min(
+            batch_size,
             self.pcfg.video_max_frames
             if is_video and self.pcfg.video_max_frames >= 0
-            else self.pcfg.max_batch
+            else self.pcfg.max_batch,
         )
         if max_batch < 0:
             return tuple(range(batch_size))
@@ -462,9 +464,10 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         batch = x0.shape[0]
         height, width = x0.shape[-2:]
         cols, rows = self.calc_cols_rows(
-            min(batch, self.pcfg.max_batch),
-            width,
-            height,
+            batch_size=min(batch, self.pcfg.max_batch),
+            width=width,
+            height=height,
+            max_cols=self.pcfg.max_batch_cols,
         )
         return x0, cols, rows
 
@@ -514,14 +517,15 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         batch = decoded.shape[0]
         decoded = decoded[self.calculate_indexes(batch, is_video=frames > 1), :]
         cols, rows = self.calc_cols_rows(
-            min(
+            batch_size=min(
                 batch,
                 self.pcfg.video_max_frames
                 if frames > 1 and self.pcfg.video_max_frames >= 0
                 else batch,
             ),
-            width,
-            height,
+            width=width,
+            height=height,
+            max_cols=self.pcfg.max_batch_cols,
         )
         return (
             decoded.clamp_(0.0, 1.0).mul_(255.0).round_().detach(),
@@ -554,17 +558,32 @@ class BetterPreviewer(_ORIG_PREVIEWER):
             rows,
         )
 
+    @staticmethod
+    @lru_cache(maxsize=64)
     def calc_cols_rows(
-        self,
+        *,
         batch_size: int,
         width: int,
         height: int,
+        max_cols: int | None = None,
     ) -> tuple[int, int]:
-        max_cols = self.pcfg.max_batch_cols
-        ratio = height / width
-        cols = max(1, min(round((batch_size * ratio) ** 0.5), max_cols, batch_size))
-        rows = math.ceil(batch_size / cols)
-        return cols, rows
+        if batch_size < 2:
+            return 1, 1
+        max_cols = max_cols or batch_size
+        limit_cols = min(batch_size, max(1, max_cols))
+        best_cols, best_rows = 1, batch_size
+        min_max_dim = min_empty_cells = math.inf
+
+        for cols in range(1, limit_cols + 1):
+            rows = math.ceil(batch_size / cols)
+            max_dim = max(cols * width, rows * height)
+            empty_cells = (cols * rows) - batch_size
+            if max_dim < min_max_dim or (
+                max_dim == min_max_dim and empty_cells < min_empty_cells
+            ):
+                min_max_dim, min_empty_cells = max_dim, empty_cells
+                best_cols, best_rows = cols, rows
+        return best_cols, best_rows
 
     def decoded_to_animation(
         self,
@@ -598,12 +617,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         video_frames: int = 0,
     ) -> Image | ImageWrapper:
         batch, (height, width) = samples.shape[0], samples.shape[-3:-1]
-        samples = samples.to(
-            device="cpu",
-            dtype=torch.uint8,
-            non_blocking=self.pcfg.preview_non_blocking
-            and device_supports_non_blocking(samples.device),
-        ).numpy()
+        samples = samples.to(device="cpu", dtype=torch.uint8).numpy()
         if batch == 1:
             self.cached = ImageWrapper((Image.fromarray(samples[0]),))
             return self.cached
@@ -617,7 +631,12 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         )
         if animate:
             return self.decoded_to_animation(samples, video_frames=video_frames)
-        cols, rows = self.calc_cols_rows(batch, width, height)
+        cols, rows = self.calc_cols_rows(
+            batch_size=batch,
+            width=width,
+            height=height,
+            max_cols=self.pcfg.max_batch_cols,
+        )
         img_size = (width * cols, height * rows)
         if self.cached is not None and self.cached.size == img_size:
             result = self.cached
@@ -660,13 +679,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         )
         return True
 
-    def fallback_previewer(
-        self,
-        x0: torch.Tensor,
-        *,
-        quiet=False,
-        video_frames: int = 0,
-    ) -> Image:
+    def fallback_previewer(self, x0: torch.Tensor, *, quiet=False) -> Image:
         if not quiet:
             fallback_mode = "using fallback" if self.oom_fallback else "skipping"
             tqdm.write(
@@ -686,7 +699,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 self.fallback_previewer_model(x0),
                 cols,
                 rows,
-                video_frames=video_frames,
+                video_frames=0,
             )
         except torch.OutOfMemoryError:
             return self.blank
@@ -764,11 +777,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
             if self.check_use_cached(throttle):
                 return self.cached
         if using_fallback:
-            return self.fallback_previewer(
-                x0,
-                quiet=True,
-                video_frames=eff_video_frames,
-            )
+            return self.fallback_previewer(x0, quiet=True)
         used_fallback = False
         start_time = time()
         try:
