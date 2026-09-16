@@ -2,6 +2,21 @@
 
 Note, only relatively significant changes to user-visible functionality will be included here. Most recent changes at the top.
 
+## 20260916
+
+This update involves some significant settings handling and previewer backend changes. Please create an issue if you experience problems.
+
+* `.safetensors` format previewer models are supported (and will be used in preference to PyTorch checkpoints) if available. (It will look for `.safetensors` and `.st` extensions for `.pth`.)
+* Better handling for audio model previews/additional support. Now supported: ACE-Step 1.0 and 1.5, MiniMax Music 3, Stable Audio 1 and 3, YuE2.
+* Grid layout for batch previews should be somewhat less moronic now. I hope.
+* Fixed preview endpoint refresh timing logic (incorrectly did not take the video length into account when calculating how often to refresh).
+* Fixed handling of latent formats with spatial compression factor that isn't 8.
+* Added a `throttle_secs_video` configuration parameter to allow specifying a different throttle time for video generations (only applies when generating with more than 1 frame).
+* Remove logic that incorrectly only used the first batch item for video latent formats.
+* Fixed previewer OOM fallback logic.
+* Not currently documented, but the `BlehSageAttentionSampler` node supports `sageattn_skip_asymmetric` (boolean) and `sageattn_sequence_threshold` (integer) parameters via the YAML parameters input. This can be used to disable the attention optimization for small or asymmetric attention calls (typically cross attentions) for models that don't use joint attention.
+* Better handling of single frame inputs for the `TAEVideoEncode` node.
+
 ## 20260807
 
 * Initial support for Minimax H3 TAE models and previewing.

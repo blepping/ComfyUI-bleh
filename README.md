@@ -35,7 +35,7 @@ There are links to the various TAE models used for high quality previewing near 
 * Supports throttling previews. Do you really need your expensive high quality preview to get updated 3 times a second?
 * Supports LTX (2.0 and 2.3). **Note**: You need to use the `BlehFixGuiderPreviewing` node for LTX. See the description of it below.
 
-The previewer can now show visual previews for some audio models: ACE-Step 1.0 (`aceaudio`), ACE-Step 1.5 (`aceaudio15`), and MiniMax Music3 (`minimaxmusic3`). If you want to disable that feature, you can add the latent format name (parenthesized part, I.E. `aceaudio`) to the
+The previewer can now show visual previews for some audio models: ACE-Step 1.0 (`aceaudio`), ACE-Step 1.5 (`aceaudio15`), MiniMax Music3 (`minimaxmusic3`) and YuE2 (`yue2`). If you want to disable that feature, you can add the latent format name (parenthesized part, I.E. `aceaudio`) to the
 `blacklist_formats` list. For example if you are using a YAML configuration file you could use: `blacklist_formats: ["aceaudio", "minimaxmusic3"]`
 
 **General settings defaults:**

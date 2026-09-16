@@ -46,6 +46,7 @@ AUDIO_LATENT_FORMAT_NAMES = frozenset(
         "minimaxmusic3",
         "stableaudio1",
         "stableaudio3",
+        "yue2",
     ),
 )
 
@@ -120,9 +121,16 @@ def normalize_to_scale(
 
 
 class ImageWrapper:
-    def __init__(self, frames: tuple | Image, frame_duration: int = 250):
+    def __init__(
+        self,
+        frames: tuple | Image,
+        *,
+        frame_duration: int = 250,
+        pcfg: settings.PreviewSettings | None = None,
+    ):
         self._frames = (frames,) if not isinstance(frames, (tuple, list)) else frames
         self._frame_duration = frame_duration
+        self._pcfg = pcfg or settings.SETTINGS.previews
 
     def _save_image(
         self,
@@ -146,14 +154,11 @@ class ImageWrapper:
         return buf
 
     def save(self, fp, format: str | None, **kwargs: Any):  # noqa: A002
+        pcfg = self._pcfg
         frames = self._frames
         publishing = last_preview.LAST_PREVIEW is not None
         animated = len(frames) > 1
-        split_preview = (
-            animated
-            and publishing
-            and settings.SETTINGS.previews.only_animate_last_preview
-        )
+        split_preview = animated and publishing and pcfg.only_animate_last_preview
         result_format = "webp" if animated else (format or "png")
         result = self._save_image(frames, format=result_format, **kwargs).getvalue()
         _preview_format, preview_result = (
@@ -165,10 +170,15 @@ class ImageWrapper:
             )
         )
         if publishing:
+            duration = (
+                2 + int((len(self._frames) * self._frame_duration) / 1000)
+                if animated
+                else None
+            )
             last_preview.LAST_PREVIEW.update(
                 image_bytes=result,
                 content_type=f"image/{result_format}",
-                duration=2 + int((len(self._frames) * self._frame_duration) / 1000),
+                duration=duration,
             )
         fp.write(preview_result)
 
@@ -176,6 +186,14 @@ class ImageWrapper:
         return ImageWrapper(
             tuple(frame.resize(*args, **kwargs) for frame in self._frames),
             frame_duration=self._frame_duration,
+            pcfg=self._pcfg,
+        )
+
+    def copy(self) -> ImageWrapper:
+        return self.__class__(
+            tuple(i.copy() for i in self._frames),
+            frame_duration=self._frame_duration,
+            pcfg=self._pcfg,
         )
 
     def __getattr__(self, key):
@@ -313,6 +331,15 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         self.skip_upscale_layers_state: tuple[int, int] | tuple[None, None] | None = (
             None
         )
+        self.preview_counter = 0
+
+    @property
+    def blank_copy(self) -> Image:
+        return self.blank.copy()
+
+    @property
+    def cached_copy(self) -> Image:
+        return self.cached.copy() if self.cached is not None else self.blank_copy
 
     def maybe_refresh_previewer(
         self,
@@ -352,7 +379,8 @@ class BetterPreviewer(_ORIG_PREVIEWER):
             self.maybe_pop_upscale_layers(width=width, height=height)
         if not self.pcfg.compile_previewer:
             return
-        tqdm.write("[Bleh] Compiling previewer")
+        if self.pcfg.verbose:
+            tqdm.write("[Bleh] Compiling previewer")
         compile_kwargs = (
             {}
             if not isinstance(self.pcfg.compile_previewer, dict)
@@ -416,13 +444,29 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         )
 
     def check_use_cached(self, throttle: float) -> bool:
+        pcfg = self.pcfg
+        if self.preview_counter < pcfg.preview_offset:
+            if pcfg.verbose:
+                tqdm.write(
+                    f"BLEH: OFFSET: counter={self.preview_counter} < {pcfg.preview_offset}",
+                )
+            self.preview_counter += 1
+            return True
         now = time()
-        use_cache = (
-            self.cached is not None and self.stamp is not None
-        ) and now - self.stamp < throttle
-        # tqdm.write(
-        #     f"PREVIEW: now={now:.3f}, stamp={self.stamp}, have cached={self.cached is not None}, use cache={use_cache}",
-        # )
+        can_use_cache = self.cached is not None and self.stamp is not None
+        use_cache = can_use_cache and now - self.stamp < throttle
+        interval = int(pcfg.preview_interval)
+        ainterval = abs(interval)
+        if not use_cache and can_use_cache and ainterval > 1:
+            mod_counter = self.preview_counter % ainterval
+            interval_skip = mod_counter != 0 if interval >= 0 else mod_counter == 0
+            use_cache = use_cache or interval_skip
+            if pcfg.verbose:
+                tqdm.write(
+                    f"BLEH: INTERVAL: interval={interval}, counter={self.preview_counter} ({mod_counter}), skip={interval_skip}",
+                )
+
+        self.preview_counter += 1
         if use_cache:
             return True
         self.stamp = now
@@ -616,7 +660,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         samples = samples.to(device="cpu", dtype=torch.uint8).numpy()
         if batch == 1:
             self.cached = ImageWrapper((Image.fromarray(samples[0]),))
-            return self.cached
+            return self.cached_copy
         atype = settings.AnimatePreview
         animate = self.pcfg.animate_preview == atype.BOTH or (
             video_frames != 0,
@@ -642,7 +686,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 box=((idx % cols) * width, ((idx // cols) % rows) * height),
             )
         self.cached = ImageWrapper((result,))
-        return self.cached
+        return self.cached_copy
 
     @torch.no_grad()
     def init_fallback_previewer(
@@ -681,13 +725,13 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 f"*** BlehBetterPreviews: Got out of memory error while decoding preview - {fallback_mode}.",
             )
         if not self.oom_fallback:
-            return self.blank
+            return self.blank_copy
         if not self.init_fallback_previewer(x0.device, x0.dtype):
             self.oom_fallback = False
             tqdm.write(
                 "*** BlehBetterPreviews: Couldn't initialize fallback previewer, giving up on previews.",
             )
-            return self.blank
+            return self.blank_copy
         x0, cols, rows = self.prepare_decode_latent(x0)
         try:
             return self.decoded_to_image(
@@ -697,7 +741,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 video_frames=0,
             )
         except torch.OutOfMemoryError:
-            return self.blank
+            return self.blank_copy
 
     def ensure_x0_shape(self, x0: torch.Tensor) -> tuple[torch.Tensor, bool]:  # noqa: PLR0911
         expected_channels = self.latent_format.latent_channels
@@ -754,13 +798,13 @@ class BetterPreviewer(_ORIG_PREVIEWER):
         ) or self.previewer_model is None
         if self.vid_info is None or using_fallback:
             if self.check_use_cached(pcfg.get_throttle(fallback=using_fallback)):
-                return self.cached
+                return self.cached_copy
             checked_cache = True
         else:
             checked_cache = False
         x0, can_preview = self.ensure_x0_shape(x0)
         if not can_preview:
-            return self.blank
+            return self.blank_copy
         is_video = x0.ndim == 5
         video_frames = x0.shape[2] if is_video else 0
         is_multiframe_video = is_video and video_frames > 1
@@ -771,7 +815,7 @@ class BetterPreviewer(_ORIG_PREVIEWER):
                 video=is_video and is_multiframe_video,
             ),
         ):
-            return self.cached
+            return self.cached_copy
         if using_fallback:
             return self.fallback_previewer(x0, quiet=True)
         used_fallback = False

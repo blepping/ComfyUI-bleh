@@ -94,6 +94,8 @@ class PreviewSettings(NamedTuple):
     publish_last_preview: bool = False
     publish_last_preview_min_refresh: float = 5
     only_animate_last_preview: bool = True
+    preview_interval: int = 1
+    preview_offset: int = 0
 
     def get_throttle(self, *, video: bool = False, fallback: bool = False) -> float:
         if fallback and self.throttle_secs_fallback is not None:
@@ -117,6 +119,8 @@ class PreviewSettings(NamedTuple):
 
     @classmethod
     def build(cls, **kwargs: Any) -> "Self":
+        if kwargs.get("preview_dtype", _Empty) is None:
+            del kwargs["preview_dtype"]
         for k, dv in cls._field_defaults.items():
             if isinstance(dv, (Blenum, frozenset, tuple)):
                 kwargs = cls.handle_complex_field(
