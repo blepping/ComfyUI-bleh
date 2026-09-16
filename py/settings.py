@@ -1,89 +1,200 @@
 from __future__ import annotations
 
+import contextlib
+import json
+from enum import Enum, auto
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+import torch
+import yaml
+
+if TYPE_CHECKING:
+    with contextlib.suppress(ImportError):
+        from typing import Self
 
 
-class Settings:
-    def __init__(self):
-        self.btp_enabled = False
-        self.btp_publish_last_preview = False
-        self.btp_publish_last_preview_min_refresh = 5
+class _Empty:
+    pass
 
-    def update(self, obj):
-        btp = obj.get("betterTaesdPreviews", None)
-        if btp is None:
-            btp = obj.get("previews", None)
-        self.btp_enabled = btp is not None and btp.get("enabled", True) is True
-        if not self.btp_enabled:
-            return
-        max_size = max(8, btp.get("max_size", 768))
-        self.btp_max_width = max(8, btp.get("max_width", max_size))
-        self.btp_max_height = max(8, btp.get("max_height", max_size))
-        self.btp_max_batch = max(1, btp.get("max_batch", 4))
-        self.btp_max_batch_cols = max(1, btp.get("max_batch_cols", 2))
-        self.btp_throttle_secs = btp.get("throttle_secs", 1)
-        self.btp_throttle_secs_fallback = btp.get("throttle_secs_fallback")
-        if self.btp_throttle_secs_fallback is None:
-            self.btp_throttle_secs_fallback = self.btp_throttle_secs
-        self.btp_skip_upscale_layers = btp.get("skip_upscale_layers", 0)
-        self.btp_preview_device = btp.get("preview_device")
-        # default, keep, float32, float16, bfloat16
-        self.btp_preview_dtype = btp.get("preview_dtype", "bfloat16")
-        self.btp_preview_non_blocking = bool(btp.get("preview_non_blocking", False))
-        self.btp_maxed_batch_step_mode = btp.get("maxed_batch_step_mode", False)
-        self.btp_compile_previewer = btp.get("compile_previewer", False)
-        self.btp_oom_fallback = btp.get("oom_fallback", "latent2rgb")
-        self.btp_oom_retry = btp.get("oom_retry", True)
-        self.btp_whitelist = frozenset(btp.get("whitelist_formats", frozenset()))
-        self.btp_blacklist = frozenset(btp.get("blacklist_formats", frozenset()))
-        self.btp_video_parallel = btp.get("video_parallel", False)
-        self.btp_video_max_frames = btp.get("video_max_frames", -1)
-        self.btp_video_temporal_upscale_level = btp.get(
-            "video_temporal_upscale_level",
-            0,
-        )
-        self.btp_animate_preview = btp.get("animate_preview", "none")
-        self.btp_verbose = btp.get("verbose", False)
-        self.btp_publish_last_preview = btp.get("publish_last_preview", False)
-        self.btp_publish_last_preview_min_refresh = max(
-            1,
-            btp.get("publish_last_preview_min_refresh", 5),
-        )
-        self.btp_only_animate_last_preview = btp.get("only_animate_last_preview", True)
+
+class Blenum(Enum):
+    @classmethod
+    def build(cls, val: str | "Self") -> "Self":
+        if isinstance(val, cls):
+            return val
+        if not isinstance(val, str):
+            errstr = f"Bad input type for enum value builder, expected a string or instance of {cls.__name__} but got {val}"
+            raise TypeError(errstr)
+        result = getattr(cls, val.strip().upper(), None)
+        if result is not None:
+            return result
+        pretty_vals = ", ".join(eitem.name.lower() for eitem in cls)
+        errstr = f"Value {val!r} is invalid for type {cls.__name__}, valid values (case-insensitive): {pretty_vals}"
+        raise ValueError(errstr)
+
+
+class OomFallback(Blenum):
+    NONE = auto()
+    LATENT2RGB = auto()
+
+
+class PreviewDtype(Blenum):
+    KEEP = auto()
+    VAE = auto()
+    FLOAT32 = auto()
+    BFLOAT16 = auto()
+    FLOAT16 = auto()
+    FLOAT64 = auto()
+
+    @property
+    def as_dtype(self) -> torch.dtype | None:
+        pdt = PreviewDtype
+        if self is pdt.VAE:
+            raise ValueError("Cannot convert VAE enum to dtype")
+        return {
+            pdt.FLOAT64: torch.float64,
+            pdt.FLOAT32: torch.float32,
+            pdt.FLOAT16: torch.float16,
+            pdt.BFLOAT16: torch.bfloat16,
+        }.get(self)
+
+
+class AnimatePreview(Blenum):
+    NONE = auto()
+    VIDEO = auto()
+    BATCH = auto()
+    BOTH = auto()
+
+
+class PreviewSettings(NamedTuple):
+    enabled: bool = True
+    verbose: bool = False
+    max_width: int = 768
+    max_height: int = 768
+    max_batch: int = 4
+    max_batch_cols: int = 2
+    throttle_secs: float = 1
+    throttle_secs_fallback: float | None = None
+    throttle_secs_video: float | None = 10
+    maxed_batch_step_mode: bool = False
+    preview_device: str | None = None
+    preview_dtype: PreviewDtype = PreviewDtype.BFLOAT16
+    preview_non_blocking: bool = False
+    skip_upscale_layers: int = 0
+    compile_previewer: bool | dict = False
+    oom_fallback: OomFallback = OomFallback.LATENT2RGB
+    oom_retry: bool = True
+    whitelist_formats: frozenset[str] = frozenset()
+    blacklist_formats: frozenset[str] = frozenset()
+    video_parallel: bool = False
+    video_max_frames: int = -1
+    video_temporal_upscale_level: int = 0
+    animate_preview: AnimatePreview = AnimatePreview.VIDEO
+    publish_last_preview: bool = False
+    publish_last_preview_min_refresh: float = 5
+    only_animate_last_preview: bool = True
+    preview_interval: int = 1
+    preview_offset: int = 0
+
+    def get_throttle(self, *, video: bool = False, fallback: bool = False) -> float:
+        if fallback and self.throttle_secs_fallback is not None:
+            return self.throttle_secs_fallback
+        if video and self.throttle_secs_video is not None:
+            return self.throttle_secs_video
+        return self.throttle_secs
+
+    @classmethod
+    def handle_complex_field(
+        cls,
+        *,
+        key: str,
+        field_type: type,
+        args: dict,
+    ) -> dict:
+        val = args.get(key, _Empty)
+        if val is not _Empty and not isinstance(val, field_type):
+            args[key] = getattr(field_type, "build", field_type)(val)
+        return args
+
+    @classmethod
+    def build(cls, **kwargs: Any) -> "Self":
+        if kwargs.get("preview_dtype", _Empty) is None:
+            del kwargs["preview_dtype"]
+        for k, dv in cls._field_defaults.items():
+            if isinstance(dv, (Blenum, frozenset, tuple)):
+                kwargs = cls.handle_complex_field(
+                    key=k,
+                    field_type=dv.__class__,
+                    args=kwargs,
+                )
+        if (max_size := kwargs.pop("max_size", None)) is not None:
+            for k in ("max_width", "max_height"):
+                if k not in kwargs:
+                    kwargs[k] = max_size
+        fs = frozenset(cls._fields)
+        kwargs = {k: v for k, v in kwargs.items() if k in fs}
+        min_vals = {
+            "max_width": 8,
+            "max_height": 8,
+            "max_batch": 1,
+            "max_batch_cols": 1,
+        }
+        for k, mv in min_vals.items():
+            v = kwargs.get(k)
+            if isinstance(v, (int, float)):
+                kwargs[k] = mv.__class__(max(mv, v))
+        return cls(**kwargs)
+
+
+class Settings(NamedTuple):
+    previews: PreviewSettings = PreviewSettings()
 
     @staticmethod
-    def get_cfg_path(filename) -> Path:
+    def get_config_path(filename: str | Path) -> Path:
         my_path = Path.resolve(Path(__file__).parent)
         return my_path.parent / filename
 
-    def try_update_from_json(self, filename):
-        import json  # noqa: PLC0415
+    @staticmethod
+    def load_config_object(base_name: str) -> dict | None:
+        base_path = Path.resolve(Path(__file__).parent.parent)
+        for ext in ("yaml", "json"):
+            filename = base_path / f"{base_name}.{ext}"
+            loader = yaml.safe_load if ext.startswith("y") else json.load
+            try:
+                with Path.open(filename) as fp:
+                    loaded = loader(fp)
+            except OSError:
+                continue
+            if loaded is None or isinstance(loaded, dict):
+                return loaded
+            errstr = f"YAML or JSON config file must be an object if present, got type {type(loaded)}"
+            raise TypeError(errstr)
+        return None
 
-        try:
-            with Path.open(self.get_cfg_path(filename)) as fp:
-                self.update(json.load(fp))
-                return True
-        except OSError:
-            return False
+    @classmethod
+    def load(cls, base_name: str = "blehconfig") -> "Self" | None:
+        loaded = cls.load_config_object(base_name)
+        return cls.build(**loaded) if loaded is not None else None
 
-    def try_update_from_yaml(self, filename):
-        try:
-            import yaml  # noqa: PLC0415
-
-            with Path.open(self.get_cfg_path(filename)) as fp:
-                self.update(yaml.safe_load(fp))
-                return True
-        except (OSError, ImportError):
-            return False
+    @classmethod
+    def build(cls, **kwargs: Any) -> "Self":
+        btp = kwargs.get("previews") or kwargs.get("betterTaesdPreviews")
+        if not btp:
+            return cls()
+        if not isinstance(btp, dict):
+            errstr = f"Configuration previews or betterTaesdPreviews (deprecated) key must be an object or unset, {type(btp)} is invalid."
+            raise TypeError(errstr)
+        return cls(previews=PreviewSettings.build(**btp))
 
 
 SETTINGS = Settings()
 
 
-def load_settings():
-    if not (
-        SETTINGS.try_update_from_yaml("blehconfig.yaml")
-        or SETTINGS.try_update_from_json("blehconfig.json")
-    ):
-        SETTINGS.update({"previews": {}})
-    return SETTINGS
+def load_settings() -> Settings | None:
+    global SETTINGS  # noqa: PLW0603
+
+    new_settings = Settings.load()
+    if new_settings is not None:
+        SETTINGS = new_settings
+    return new_settings

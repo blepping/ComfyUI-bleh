@@ -21,6 +21,11 @@ previews:
     # Minimum time between updating previews. The default will update the preview at most once per second.
     throttle_secs: 1
 
+    # Can be set to use a different throttle time for video previews.
+    # Only applies when generating more than one frame.
+    # If unset or null it will use throttle_secs.
+    throttle_secs_video: 6
+
     # Can be set to use a different throttle time when using the fallback previewer
     # (anything other than TAESD or TAEVID). If unset or null it will use throttle_secs.
     throttle_secs_fallback: null
@@ -34,7 +39,7 @@ previews:
 
     # Can be set to override the previewer dtype (which probably defaults to float32).
     # You may set it to a specific dtype: float32, float16, bfloat16
-    # Setting it to "keep" or null just leaves the dtype alone (which is probably float32).
+    # Setting it to "keep" just leaves the dtype alone (which is probably float32).
     # Setting it to "vae" will use whatever dtype ComfyUI is set to use for VAE.
     preview_dtype: bfloat16
 
@@ -90,7 +95,7 @@ previews:
     #   video: Use animated previews for video generations.
     #   batch: Use animated previews for batch generations (batch items will be frames.)
     #   both: Use animated previews for video and batch generations.
-    animate_preview: none
+    animate_preview: video
 
     # When enabled, this will add `/bleh/last_preview.html` and `/bleh/last_preview` paths
     # under whatever URI you use to access ComfyUI. The HTML version will serve a webpage
@@ -105,9 +110,9 @@ previews:
     # once every this many seconds.
     publish_last_preview_min_refresh: 5
 
-    # Only applies when you have a preview that would be animated and publish_last_preview
-    # is enabled. When this is turned on, the image sent to ComfyUI for the preview is one
-    # frame, while the image under the last preview may be animated. You probably want to
+    # When enabled and a preview is eligible for animation, the animation version will only
+    # go to the last preview endpoint. If you don't have the last preview endpoint enabled,
+    # then this effectively disabling animations completely. You probably want to
     # leave this on the default because previews can only animated with "Nodes 2.0" which
     # you probably don't want to use, so sending an animated preview to the sampler is pointless.
     only_animate_last_preview: true

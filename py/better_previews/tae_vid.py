@@ -4,15 +4,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+import safetensors.torch as st_torch
 import torch
 from torch import nn
 from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
     from .base import VideoModelInfo
 
@@ -269,7 +270,19 @@ class TAEVidBase(nn.Module):
         self.t_downscale = 2 ** sum(encoder_time_downscale)
         if checkpoint_path is None:
             return
-        sd = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        if isinstance(checkpoint_path, str):
+            checkpoint_path = Path(checkpoint_path)
+        checkpoint_ext = checkpoint_path.suffix.strip().lower()
+        if checkpoint_ext == ".pth":
+            sd = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        elif checkpoint_ext in {".safetensors", ".st"}:
+            sd = st_torch.load_file(
+                checkpoint_path,
+                device=str(device) if device is not None else "cpu",
+            )
+        else:
+            errstr = f"Cannot determine type from checkpoint path {checkpoint_path!r}, must have one of the following extensions: pth, safetensors, st"
+            raise ValueError(errstr)
         self.load_state_dict(self.patch_tgrow_layers(sd))
 
     @property

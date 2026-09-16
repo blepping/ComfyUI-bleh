@@ -57,23 +57,7 @@ else:
 HAVE_ATTN_OVERRIDE = hasattr(comfyattn, "register_attention_function")
 
 
-# class AttnsConfig(NamedTuple):
-#     name: str
-#     version: str
-#     supported_head_sizes: collections.abc.Collection
-
-# class AttentionRule(NamedTuple):
-
-
-# class AttentionRules(NamedTuple):
-#     orig_attn: Callable
-#     start_sigma: float = math.inf
-#     end_sigma: float = 0.0
-#     verbose: bool = False
-#     rules: tuple[AttentionRule, ...] = ()
-
-
-def attention_bleh(  # noqa: PLR0914
+def attention_bleh(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -86,7 +70,9 @@ def attention_bleh(  # noqa: PLR0914
     sageattn_function: collections.abc.Callable = sageattn_default_function,
     sageattn_version: str = sageattn_version,
     sageattn_verbose: bool = False,
-    **kwargs: dict[str],
+    sageattn_sequence_threshold: int = 0,
+    sageattn_skip_asymmetric: bool = False,
+    **kwargs: Any,
 ) -> torch.Tensor:
     old_sageattn = sageattn_version[:2] in {"1.", "un"}
     orig_keys = tuple(kwargs)
@@ -114,6 +100,16 @@ def attention_bleh(  # noqa: PLR0914
     batch = q.shape[0]
     dim_head = q.shape[-1] // (1 if skip_reshape else heads)
     enabled = sageattn_allow_head_sizes is None or dim_head in sageattn_allow_head_sizes
+    if enabled and sageattn_skip_asymmetric:
+        enabled = q.shape[1:] == k.shape[1:]
+    if enabled and sageattn_sequence_threshold != 0:
+        seq_size = math.prod(k.shape[1:-1])
+        enabled = (
+            sageattn_sequence_threshold > 0 and seq_size >= sageattn_sequence_threshold
+        ) or (
+            sageattn_sequence_threshold < 0
+            and seq_size <= abs(sageattn_sequence_threshold)
+        )
     if enabled and old_sageattn:
         enabled = all(t.shape == q.shape for t in (k, v))
     if sageattn_verbose:
@@ -219,12 +215,12 @@ def make_attn_wrapper(
 
         def attn(
             comfy_orig_attn: Callable,
-            *args: list,
+            *args: Any,
             _bleh_outer_kwargs=outer_kwargs,
             _bleh_orig_attention=orig_attn,
             _bleh_attn_function=sageattn_function,
             _bleh_attn=attention_bleh,
-            **kwargs: dict,
+            **kwargs: Any,
         ) -> torch.Tensor:
             return _bleh_attn(
                 *args,
@@ -236,12 +232,12 @@ def make_attn_wrapper(
     else:
 
         def attn(
-            *args: list,
+            *args: Any,
             _bleh_outer_kwargs=outer_kwargs,
             _bleh_orig_attention=orig_attn,
             _bleh_attn_function=sageattn_function,
             _bleh_attn=attention_bleh,
-            **kwargs: dict,
+            **kwargs: Any,
         ) -> torch.Tensor:
             return _bleh_attn(
                 *args,
@@ -259,7 +255,7 @@ if HAVE_ATTN_OVERRIDE:
     @contextlib.contextmanager
     def sageattn_context(
         enabled: bool,
-        **kwargs: dict,
+        **kwargs: Any,
     ):
         yield make_attn_wrapper(orig_attn=None, **kwargs) if enabled else None
 
@@ -268,7 +264,7 @@ else:
     @contextlib.contextmanager
     def sageattn_context(
         enabled: bool,
-        **kwargs: dict,
+        **kwargs: Any,
     ):
         if not enabled:
             yield None
@@ -296,7 +292,7 @@ def get_yaml_parameters(yaml_parameters: str | None = None) -> dict:
 
 
 class BlehGlobalSageAttention:
-    DESCRIPTION = "Deprecated: Prefer using BlehSageAttentionSampler if possible. This node allows globally replacing ComfyUI's attention with SageAtteniton (performance enhancement). Requires SageAttention to be installed into the ComfyUI Python environment. IMPORTANT: This is not a normal model patch. For settings to apply (including toggling on or off) the node must actually be run. If you toggle it on, run your workflow and then bypass or mute the node this will not actually disable SageAttention."
+    DESCRIPTION = "Deprecated: Prefer using BlehSageAttentionSampler if possible. This node allows globally replacing ComfyUI's attention with SageAttention (performance enhancement). Requires SageAttention to be installed into the ComfyUI Python environment. IMPORTANT: This is not a normal model patch. For settings to apply (including toggling on or off) the node must actually be run. If you toggle it on, run your workflow and then bypass or mute the node this will not actually disable SageAttention."
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "go"
     CATEGORY = "hacks"
@@ -336,7 +332,7 @@ class BlehGlobalSageAttention:
     ) -> tuple:
         if HAVE_ATTN_OVERRIDE:
             raise RuntimeError(
-                "BlehGlobalAttention does not currently support the new ComfyUI attention changes."
+                "BlehGlobalAttention does not currently support the new ComfyUI attention changes.",
             )
         if not enabled:
             if cls.orig_attn is not None:
@@ -387,9 +383,7 @@ def sageattn_sampler(
     model: object,
     x: torch.Tensor,
     sigmas: torch.Tensor,
-    # *,
-    # sageattn_sampler_options: tuple,
-    **kwargs: dict,
+    **kwargs: Any,
 ) -> torch.Tensor:
     # sampler, start_percent, end_percent, sageattn_kwargs = sageattn_sampler_options
     if config.time_mode == TimeMode.PERCENT:
@@ -407,7 +401,7 @@ def sageattn_sampler(
         model: object,
         x: torch.Tensor,
         sigma: torch.Tensor,
-        **kwargs: dict[str],
+        **kwargs: Any,
     ) -> torch.Tensor:
         sigma_float = float(sigma.max().detach().cpu())
         enabled = end_sigma <= sigma_float <= start_sigma
@@ -580,7 +574,7 @@ class AdvancedAttnConfig(NamedTuple):
     max_idx: int = -1
     delegate_override: bool = True
     op_result: str | None = None
-    latent_ops: dict[str, Callable] = {}
+    latent_ops: dict[str, Callable] | None = None
 
     @classmethod
     def build(
@@ -589,7 +583,7 @@ class AdvancedAttnConfig(NamedTuple):
         rules=(),
         time_mode: str | TimeMode | None = None,
         call_indexes=(),
-        **kwargs,
+        **kwargs: Any,
     ) -> NamedTuple:
         fs = frozenset(cls._fields)
         rules = tuple(AdvancedAttnRule.build(**r) for r in rules)
@@ -610,15 +604,20 @@ class AdvancedAttnConfig(NamedTuple):
         )
 
     def call_op(
-        self, op_key: str | None, t: torch.Tensor, *, sigma: float
+        self,
+        op_key: str | None,
+        t: torch.Tensor,
+        **kwargs: Any,
     ) -> torch.Tensor:
-        op = None if op_key is None else self.latent_ops.get(op_key)
+        op = (
+            None
+            if op_key is None or not self.latent_ops
+            else self.latent_ops.get(op_key)
+        )
         if op is None:
             return t
         return (
-            op(t)
-            if not hasattr(op, "EXTENDED_LATENT_OPERATION")
-            else op(t, sigma=sigma)
+            op(t) if not hasattr(op, "EXTENDED_LATENT_OPERATION") else op(t, **kwargs)
         )
 
     def attn_wrapper(
@@ -630,8 +629,8 @@ class AdvancedAttnConfig(NamedTuple):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.Tensor:
         fallback_attn = (
             partial(old_override, comfy_orig_attn)
@@ -639,7 +638,6 @@ class AdvancedAttnConfig(NamedTuple):
             else comfy_orig_attn
         )
         result = None
-        rules = self.rules
         call_idx = currattncall.idx
         rev_idx = (
             -abs(currattncall.max_idx - currattncall.idx)

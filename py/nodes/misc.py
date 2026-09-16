@@ -570,7 +570,7 @@ class PreviewFixGuider:
 
 
 class BlehFixGuiderPreviewing:
-    DESCRIPTION = "Wraps a guider to give the Bleh previewing system a hint about the latent shapes. Only necessary for models like LTX-2 which use nested tensors."
+    DESCRIPTION = "Wraps a guider to give the Bleh previewing system a hint about the latent shapes or override parameters. Only necessary for models like LTX-2 which use nested tensors."
     FUNCTION = "go"
     OUTPUT_NODE = False
     CATEGORY = "hacks"
