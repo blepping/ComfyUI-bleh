@@ -99,7 +99,7 @@ VIDEO_FORMATS = {
             patch_size=2,
             temporal_layers=3,
             temporal_compression=4,
-            tae_model="taeh3",
+            tae_model="taeh3.pth",
             tae_class=tv.TAEVidH3,
         ),
     )

@@ -844,6 +844,12 @@ class BetterPreviewer(_ORIG_PREVIEWER):
 def find_previewer_model(basename: str | None) -> str | None:
     if basename is None:
         return None
+    # An explicit filename wins over probing the known extensions: vae_approx
+    # can hold several files sharing the same stem that are NOT the same model
+    # (e.g. "taeh3" exists both as taeh3.pth for TAEVid and as an unrelated
+    # taeh3.safetensors), and probing picks whichever extension comes first.
+    if maybe_filename := folder_paths.get_full_path("vae_approx", basename):
+        return maybe_filename
     for ext in ("safetensors", "st", "pth"):
         maybe_filename = folder_paths.get_full_path("vae_approx", f"{basename}.{ext}")
         if maybe_filename:
